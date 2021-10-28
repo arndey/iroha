@@ -4,7 +4,8 @@ on:
     branches: [iroha2-dev-schema-to-client]
 jobs:
   dispatch:
-    runs-on: [ self-hosted, Linux ]
+#    runs-on: [ self-hosted, Linux ] TODO
+    runs-on: ubuntu-latest
     container: rust:1.56-buster
     steps:
       - uses: actions/checkout@v2
