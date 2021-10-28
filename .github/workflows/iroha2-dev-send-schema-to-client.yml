@@ -1,4 +1,4 @@
-name: Main workflow
+name: Iroha2 dev send schema to client
 on:
   push:
     branches: [iroha2-dev-schema-to-client]
@@ -47,7 +47,7 @@ jobs:
         id: schema-hash
       - uses: peter-evans/repository-dispatch@v1
         with:
-          token: ${{ secrets.REPO_ACCESS_TOKEN }}
+          token: ${{ secrets.PUBLIC_REPO_ACCESS_TOKEN }}
           repository: arndey/iroha-java
           event-type: update-schema
           client-payload: '{"schemaHash": "${{ steps.schema-hash.outputs.SCHEMA_FILE_HASH }}"}'
