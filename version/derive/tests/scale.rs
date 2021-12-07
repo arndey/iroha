@@ -20,13 +20,13 @@ mod tests {
 
         use super::*;
 
-        declare_versioned!(VersionedMessage 1..3, Debug, Clone, iroha_derive::FromVariant);
+        declare_versioned!(VersionedMessage 1..3, Debug, Clone, iroha_macro::FromVariant);
 
-        #[version(n = 1, versioned = "VersionedMessage", derive = "Debug, Clone")]
+        #[version(n = 1, versioned = "VersionedMessage")]
         #[derive(Debug, Clone, Decode, Encode, Serialize, Deserialize)]
         pub struct Message;
 
-        #[version(n = 2, versioned = "VersionedMessage", derive = "Debug, Clone")]
+        #[version(n = 2, versioned = "VersionedMessage")]
         #[derive(Debug, Clone, Decode, Encode, Serialize, Deserialize)]
         pub struct Message2;
     }
@@ -36,17 +36,17 @@ mod tests {
 
         use super::*;
 
-        declare_versioned!(VersionedMessage 1..4, Debug, Clone, iroha_derive::FromVariant);
+        declare_versioned!(VersionedMessage 1..4, Debug, Clone, iroha_macro::FromVariant);
 
-        #[version(n = 1, versioned = "VersionedMessage", derive = "Debug, Clone")]
+        #[version(n = 1, versioned = "VersionedMessage")]
         #[derive(Debug, Clone, Decode, Encode, Serialize, Deserialize)]
         pub struct Message;
 
-        #[version(n = 2, versioned = "VersionedMessage", derive = "Debug, Clone")]
+        #[version(n = 2, versioned = "VersionedMessage")]
         #[derive(Debug, Clone, Decode, Encode, Serialize, Deserialize)]
         pub struct Message2;
 
-        #[version(n = 3, versioned = "VersionedMessage", derive = "Debug, Clone")]
+        #[version(n = 3, versioned = "VersionedMessage")]
         #[derive(Debug, Clone, Decode, Encode, Serialize, Deserialize)]
         pub struct Message3(pub String);
     }
@@ -63,11 +63,11 @@ mod tests {
             VersionedMessage::decode_versioned(&bytes).map_err(|e| e.to_string())?;
         match decoded_message {
             VersionedMessage::V1(message) => {
-                let _: Message = message.into();
+                let _: Message = message;
                 Ok(())
             }
             VersionedMessage::V2(message) => {
-                let _: Message2 = message.into();
+                let _: Message2 = message;
                 Err("Should have been message v1.".to_owned())
             }
         }

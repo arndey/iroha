@@ -14,7 +14,7 @@ categories = ["cryptography::cryptocurrencies"]
 [features]
 bridge = ["iroha_core/bridge"]
 dex = ["iroha_core/dex"]
-roles = ["iroha_core/roles"]
+roles = ["iroha_core/roles", "iroha_permissions_validators/roles"]
 telemetry = ["iroha_core/telemetry"]
 dev-telemetry = ["iroha_core/dev-telemetry"]
 default = ["bridge"]
@@ -31,5 +31,4 @@ iroha_logger = { version = "=0.1.0", path = "../logger"}
 
 color-eyre = "0.5.11"
 structopt = "0.3"
-tracing = "0.1"
-tokio = { version = "1.6.0", features = ["sync", "time", "rt", "io-util", "rt-multi-thread", "macros", "fs"]}
+tokio = { version = "1.6.0", features = ["rt", "rt-multi-thread"]}

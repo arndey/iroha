@@ -1,18 +1,19 @@
+//! Contains the end-point querying logic.  This is where you need to
+//! add any custom end-point related logic.
 use std::{
     collections::HashMap,
-    convert::{TryFrom, TryInto},
     fmt::{self, Debug, Formatter},
     sync::mpsc,
     thread,
     time::Duration,
 };
 
-use eyre::{eyre, Error, Result, WrapErr};
+use eyre::{eyre, Result, WrapErr};
 use http_client::WebSocketStream;
-use iroha_core::{smartcontracts::Query, torii::GetConfiguration, wsv::World};
+use iroha_config::{GetConfiguration, PostConfiguration};
 use iroha_crypto::{HashOf, KeyPair};
 use iroha_data_model::prelude::*;
-use iroha_logger::log;
+use iroha_logger::prelude::*;
 use iroha_version::prelude::*;
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -27,11 +28,13 @@ use crate::{
 pub struct Client {
     /// Url for accessing iroha node
     pub torii_url: String,
+    /// Url to report status for administration
+    pub status_url: String,
     /// Maximum number of instructions in blockchain
     pub max_instruction_number: u64,
     /// Accounts keypair
     pub key_pair: KeyPair,
-    /// Transaction time to live in miliseconds
+    /// Transaction time to live in milliseconds
     pub proposed_transaction_ttl_ms: u64,
     /// Transaction status timeout
     pub transaction_status_timeout: Duration,
@@ -39,7 +42,8 @@ pub struct Client {
     pub account_id: AccountId,
     /// Http headers which will be appended to each request
     pub headers: http_client::Headers,
-    /// If `true` add nonce, which make different hashes for transactions which occur repeatedly and simultaneously
+    /// If `true` add nonce, which makes different hashes for
+    /// transactions which occur repeatedly and/or simultaneously
     pub add_transaction_nonce: bool,
 }
 
@@ -49,6 +53,7 @@ impl Client {
     pub fn new(configuration: &Configuration) -> Self {
         Self {
             torii_url: configuration.torii_api_url.clone(),
+            status_url: configuration.torii_status_url.clone(),
             max_instruction_number: configuration.max_instruction_number,
             key_pair: KeyPair {
                 public_key: configuration.public_key.clone(),
@@ -68,6 +73,7 @@ impl Client {
     pub fn with_headers(configuration: &Configuration, headers: HashMap<String, String>) -> Self {
         Self {
             torii_url: configuration.torii_api_url.clone(),
+            status_url: configuration.torii_status_url.clone(),
             max_instruction_number: configuration.max_instruction_number,
             key_pair: KeyPair {
                 public_key: configuration.public_key.clone(),
@@ -181,7 +187,7 @@ impl Client {
         let hash = transaction.hash();
         let transaction_bytes: Vec<u8> = transaction.encode_versioned()?;
         let response = http_client::post(
-            &format!("{}{}", self.torii_url, uri::TRANSACTION),
+            format!("{}/{}", &self.torii_url, uri::TRANSACTION),
             transaction_bytes,
             Vec::<(String, String)>::new(),
             self.headers.clone(),
@@ -267,8 +273,8 @@ impl Client {
                 .send(EventListenerInitialized)
                 .wrap_err("Failed to send through init channel.")?;
             for event in event_iterator.flatten() {
-                if let Event::Pipeline(event) = event {
-                    match event.status {
+                if let Event::Pipeline(this_event) = event {
+                    match this_event.status {
                         PipelineStatus::Validating => {}
                         PipelineStatus::Rejected(reason) => event_sender
                             .send(Err(reason))
@@ -304,14 +310,14 @@ impl Client {
         pagination: Pagination,
     ) -> Result<R::Output>
     where
-        R: Query<World> + Into<QueryBox> + Debug,
+        R: Query + Into<QueryBox> + Debug,
         <R::Output as TryFrom<Value>>::Error: Into<eyre::Error>,
     {
         let pagination: Vec<_> = pagination.into();
         let request = QueryRequest::new(request.into(), self.account_id.clone());
         let request: VersionedSignedQueryRequest = request.sign(self.key_pair.clone())?.into();
         let response = http_client::post(
-            &format!("{}{}", self.torii_url, uri::QUERY),
+            format!("{}/{}", &self.torii_url, uri::QUERY),
             request.encode_versioned()?,
             pagination,
             self.headers.clone(),
@@ -323,7 +329,8 @@ impl Client {
                 std::str::from_utf8(response.body()).unwrap_or(""),
             ));
         }
-        let QueryResult(result) = response.body().clone().try_into().map_err(Error::msg)?;
+        let result = VersionedQueryResult::decode_versioned(response.body())?;
+        let VersionedQueryResult::V1(QueryResult(result)) = result;
         R::Output::try_from(result)
             .map_err(Into::into)
             .wrap_err("Unexpected type")
@@ -336,7 +343,7 @@ impl Client {
     #[log]
     pub fn request<R>(&mut self, request: R) -> Result<R::Output>
     where
-        R: Query<World> + Into<QueryBox> + Debug,
+        R: Query + Into<QueryBox> + Debug,
         <R::Output as TryFrom<Value>>::Error: Into<eyre::Error>,
     {
         self.request_with_pagination(request, Pagination::default())
@@ -348,7 +355,7 @@ impl Client {
     /// Fails if subscribing to websocket fails
     pub fn listen_for_events(&mut self, event_filter: EventFilter) -> Result<EventIterator> {
         EventIterator::new(
-            &format!("{}{}", self.torii_url, uri::SUBSCRIPTION),
+            &format!("{}/{}", &self.torii_url, uri::SUBSCRIPTION),
             event_filter,
             self.headers.clone(),
         )
@@ -370,17 +377,15 @@ impl Client {
         let pagination: Vec<_> = pagination.into();
         for _ in 0..retry_count {
             let response = http_client::get(
-                &format!("{}{}", self.torii_url, uri::PENDING_TRANSACTIONS),
+                format!("{}/{}", &self.torii_url, uri::PENDING_TRANSACTIONS),
                 Vec::new(),
                 pagination.clone(),
                 self.headers.clone(),
             )?;
             if response.status() == StatusCode::OK {
-                let pending_transactions: PendingTransactions =
-                    VersionedPendingTransactions::decode_versioned(response.body())?
-                        .into_v1()
-                        .ok_or_else(|| eyre!("Expected pending transaction message version 1."))?
-                        .into();
+                let pending_transactions =
+                    VersionedPendingTransactions::decode_versioned(response.body())?;
+                let VersionedPendingTransactions::V1(pending_transactions) = pending_transactions;
                 let transaction = pending_transactions
                     .into_iter()
                     .find(|pending_transaction| {
@@ -391,7 +396,7 @@ impl Client {
                 if transaction.is_some() {
                     return Ok(transaction);
                 }
-                thread::sleep(retry_in)
+                thread::sleep(retry_in);
             } else {
                 return Err(eyre!(
                     "Failed to make query request with HTTP status: {}, {}",
@@ -423,12 +428,13 @@ impl Client {
     }
 
     fn get_config<T: DeserializeOwned>(&self, get_config: &GetConfiguration) -> Result<T> {
-        let mut headers = self.headers.clone();
-        headers.insert("Content-Type".to_owned(), "application/json".to_owned());
+        let headers = [("Content-Type".to_owned(), "application/json".to_owned())]
+            .into_iter()
+            .collect();
         let get_cfg = serde_json::to_vec(get_config).wrap_err("Failed to serialize")?;
 
         let resp = http_client::get::<_, Vec<(&str, &str)>, _, _>(
-            &format!("{}{}", self.torii_url, uri::CONFIGURATION),
+            format!("{}/{}", &self.torii_url, uri::CONFIGURATION),
             get_cfg,
             vec![],
             headers,
@@ -443,21 +449,69 @@ impl Client {
         serde_json::from_slice(resp.body()).wrap_err("Failed to decode body")
     }
 
-    /// Gets documentation of some field on config
+    /// Send a request to change the configuration of a specified field.
+    ///
+    /// # Errors
+    /// If sending request or decoding fails
+    pub fn set_config(&self, post_config: PostConfiguration) -> Result<bool> {
+        let headers = [("Content-type".to_owned(), "application/json".to_owned())]
+            .into_iter()
+            .collect();
+        let resp = http_client::post::<_, Vec<(&str, &str)>, _, _>(
+            &format!("{}/{}", self.torii_url, uri::CONFIGURATION),
+            serde_json::to_vec(&post_config)
+                .wrap_err(format!("Failed to serialize {:?}", post_config))?,
+            vec![],
+            headers,
+        )?;
+        if resp.status() != StatusCode::OK {
+            return Err(eyre!(
+                "Failed to post configuration with HTTP status: {}. {}",
+                resp.status(),
+                std::str::from_utf8(resp.body()).unwrap_or(""),
+            ));
+        }
+        serde_json::from_slice(resp.body())
+            .wrap_err(format!("Failed to decode body {:?}", resp.body()))
+    }
+
+    /// Get documentation of some field on config
+    ///
     /// # Errors
     /// Fails if sending request or decoding fails
     pub fn get_config_docs(&self, field: &[&str]) -> Result<Option<String>> {
         let field = field.iter().copied().map(ToOwned::to_owned).collect();
-        self.get_config(&GetConfiguration::Docs { field })
+        self.get_config(&GetConfiguration::Docs(field))
             .wrap_err("Failed to get docs for field")
     }
 
-    /// Gets value of config on peer
+    /// Get value of config on peer
+    ///
     /// # Errors
     /// Fails if sending request or decoding fails
     pub fn get_config_value(&self) -> Result<serde_json::Value> {
         self.get_config(&GetConfiguration::Value)
             .wrap_err("Failed to get configuration value")
+    }
+
+    /// Gets network status seen from the peer
+    /// # Errors
+    /// Fails if sending request or decoding fails
+    pub fn get_status(&self) -> Result<Status> {
+        let resp = http_client::get::<_, Vec<(&str, &str)>, _, _>(
+            format!("{}/{}", &self.status_url, uri::STATUS),
+            Bytes::new(),
+            vec![],
+            self.headers.clone(),
+        )?;
+        if resp.status() != StatusCode::OK {
+            return Err(eyre!(
+                "Failed to get status with HTTP status: {}. {}",
+                resp.status(),
+                std::str::from_utf8(resp.body()).unwrap_or(""),
+            ));
+        }
+        serde_json::from_slice(resp.body()).wrap_err("Failed to decode body")
     }
 }
 
@@ -488,7 +542,7 @@ impl EventIterator {
             match stream.read_message() {
                 Ok(WebSocketMessage::Binary(message)) => {
                     if let EventSocketMessage::SubscriptionAccepted =
-                        VersionedEventSocketMessage::decode_versioned(&message)?.into_inner_v1()
+                        VersionedEventSocketMessage::decode_versioned(&message)?.into_v1()
                     {
                         break;
                     }
@@ -514,22 +568,25 @@ impl Iterator for EventIterator {
                 Ok(WebSocketMessage::Binary(message)) => {
                     let event_socket_message =
                         match VersionedEventSocketMessage::decode_versioned(&message) {
-                            Ok(event_socket_message) => event_socket_message.into_inner_v1(),
+                            Ok(event_socket_message) => event_socket_message.into_v1(),
                             Err(err) => return Some(Err(err.into())),
                         };
                     let event = match event_socket_message {
                         EventSocketMessage::Event(event) => event,
-                        message => return Some(Err(eyre!("Expected Event but got {:?}", message))),
+                        msg => return Some(Err(eyre!("Expected Event but got {:?}", msg))),
                     };
-                    let message =
+                    let versioned_message =
                         match VersionedEventSocketMessage::from(EventSocketMessage::EventReceived)
                             .encode_versioned()
                             .wrap_err("Failed to serialize receipt.")
                         {
-                            Ok(message) => message,
+                            Ok(msg) => msg,
                             Err(e) => return Some(Err(e)),
                         };
-                    return match self.stream.write_message(WebSocketMessage::Binary(message)) {
+                    return match self
+                        .stream
+                        .write_message(WebSocketMessage::Binary(versioned_message))
+                    {
                         Ok(_) => Some(Ok(event)),
                         Err(err) => Some(Err(eyre!("Failed to send receipt: {}", err))),
                     };
@@ -549,6 +606,7 @@ impl Debug for Client {
         f.debug_struct("Client")
             .field("public_key", &self.key_pair.public_key)
             .field("torii_url", &self.torii_url)
+            .field("status_url", &self.status_url)
             .finish()
     }
 }
@@ -627,32 +685,6 @@ pub mod transaction {
     pub fn by_hash(hash: impl Into<EvaluatesTo<Hash>>) -> FindTransactionByHash {
         FindTransactionByHash::new(hash)
     }
-}
-
-/// URI that `Client` uses to route outgoing requests.
-//TODO: remove duplication with `iroha_core::torii::uri`.
-pub mod uri {
-    //! Module with uri constants
-
-    /// Query URI is used to handle incoming Query requests.
-    pub const QUERY: &str = "/query";
-    /// Instructions URI is used to handle incoming ISI requests.
-    pub const TRANSACTION: &str = "/transaction";
-    /// URI for configuration checking
-    pub const CONFIGURATION: &str = "/configuration";
-    /// Block URI is used to handle incoming Block requests.
-    pub const CONSENSUS: &str = "/consensus";
-    /// Health URI is used to handle incoming Healthcheck requests.
-    pub const HEALTH: &str = "/health";
-    /// Metrics URI is used to export metrics according to [Prometheus
-    /// Guidance](https://prometheus.io/docs/instrumenting/writing_exporters/).
-    pub const METRICS: &str = "/metrics";
-    /// The URI used for block synchronization.
-    pub const BLOCK_SYNC: &str = "/block";
-    /// The web socket uri used to subscribe to pipeline and data events.
-    pub const SUBSCRIPTION: &str = "/events";
-    /// Get pending transactions.
-    pub const PENDING_TRANSACTIONS: &str = "/pending_transactions";
 }
 
 #[cfg(test)]

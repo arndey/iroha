@@ -9,6 +9,7 @@
     - [Listen to Events](#listen-to-events)
     - [Configuration](#configuration)
     - [Health](#health)
+  - [Status Endpoint](#status-endpoint)
   - [Parity Scale Codec](#parity-scale-codec)
   - [Reference Iroha Client Implementation](#reference-iroha-client-implementation)
   - [Iroha Structures](#iroha-structures)
@@ -25,7 +26,7 @@
 
 **Method**: `POST`
 
-**Expects**: Body: `Transaction`
+**Expects**: Body: `VersionedTransaction`
 
 **Responses**:
 - 200 OK - Transaction Accepted (But not guaranteed to have passed consensus yet)
@@ -43,14 +44,14 @@
 **Method**: `POST`
 
 **Expects**:
-- Body: `SignedQueryRequest`
+- Body: `VersionedSignedQueryRequest`
 - Query parameters:
   + `start` - Optional parameter in queries where results can be indexed. Use to return results from specified point. Results are ordered where can be by id which uses rust's [PartialOrd](https://doc.rust-lang.org/std/cmp/trait.PartialOrd.html#derivable) and [Ord](https://doc.rust-lang.org/std/cmp/trait.Ord.html) traits.
   + `limit` - Optional parameter in queries where results can be indexed. Use to return specific number of results.
 
 **Responses**:
 - 200 OK - Query Executed Successfully and Found Value
-  + Body: `QueryResult`
+  + Body: `VersionedQueryResult`
 - 4xx - Query Rejected or Found Nothing
 
 Status and whether each step succeeded:
@@ -96,6 +97,18 @@ When server is ready to transmit events it sends: `SubscriptionAccepted`
 
 Server sends `Event` and expects `EventReceived` after each, before sending the next event.
 
+**Notes**:
+
+Usually, the client  waits for Transaction events. 
+
+Transaction event statuses can be either `Validating`, `Committed` or `Rejected`.
+
+Transaction statuses proceed from `Validating` to either  `Committed` or `Rejected`. 
+However, due to the distributed nature of the network, some peers might receive events out of order (e.g. `Committed` before `Validating`).
+
+It's possible that some peers in the network are offline for the validation round. If the client connects to them while they are offline, the peers might not respond with the `Validating` status.
+But when the offline peers come back online they will synchronize the blocks. They are then guaranteed to respond with the `Committed` (or `Rejected`) status depending on the information found in the block.
+
 ### Configuration
 
 **Protocol**: HTTP
@@ -114,6 +127,12 @@ There are 2 variants:
 {
     "Docs": ["a", "b", "c"]
 }
+```
+
+**Examples**: 
+To get the top-level configuration docs for [`Torii`]
+```bash
+curl -X GET -H 'content-type: application/json' http://127.0.0.1:8080/configuration -d '{"Docs" : ["torii"]} ' -i
 ```
 
 **Responses**:
@@ -139,6 +158,66 @@ Also returns current status of peer in json string:
 "Healthy"
 ```
 
+## Status Endpoint
+
+**Protocol**: HTTP
+
+**Encoding**: Json
+
+**Endpoint**: `/status`
+
+**Method**: `GET`
+
+**Expects**: -
+
+**Responses**:
+- 200 OK - reports status:
+  + Number of connected peers, except for the reporting peer itself
+  + Number of committed blocks (block height)
+  + Total number of transactions
+  + `uptime` since creation of the genesis block in milliseconds.
+  ```json
+  {
+      "peers": 3,
+      "blocks": 1,
+      "txs": 3,
+      "uptime": 3200,
+  }
+  ```
+
+## Metrics Endpoint
+
+**Protocol**: HTTP
+
+**Encoding**: Prometheus
+
+**Endpoint**: `/metrics`
+
+**Method**: `GET`
+
+**Expects**: -
+
+**Responses**:
+- 200 OK - currently mirrors status:
+  + Number of connected peers, except for the reporting peer itself
+  + Number of committed blocks (block height)
+  + Total number of transactions
+  + `uptime` since creation of the genesis block in milliseconds.
+  ```bash
+  # HELP block_height Current block height
+  # TYPE block_height counter
+  block_height 0
+  # HELP connected_peers Total number of currently connected peers
+  # TYPE connected_peers gauge
+  connected_peers 0
+  # HELP txs Transactions committed
+  # TYPE txs counter
+  txs 0
+  # HELP uptime_since_genesis_ms Uptime of the network, starting from creation of the genesis block
+  # TYPE uptime_since_genesis_ms gauge
+  uptime_since_genesis_ms 0
+  ```
+
 ## Parity Scale Codec
 
 For more information on codec check [Substrate Dev Hub](https://substrate.dev/docs/en/knowledgebase/advanced/codec) and codec's [Github repository](https://github.com/paritytech/parity-scale-codec).
@@ -149,9 +228,9 @@ For more information on codec check [Substrate Dev Hub](https://substrate.dev/do
 
 ## Iroha Structures
 
-- `Transaction` - `iroha_data_model::transaction::Transaction`
-- `SignedQueryRequest` - `iroha_data_model::query::SignedQueryRequest`
-- `QueryResult` - `iroha_data_model::query::QueryResult`
+- `VersionedTransaction` - `iroha_data_model::transaction::VersionedTransaction`
+- `VersionedSignedQueryRequest` - `iroha_data_model::query::VersionedSignedQueryRequest`
+- `VersionedQueryResult` - `iroha_data_model::query::VersionedQueryResult`
 - `SubscriptionRequest` - `iroha_data_model::events::EventSocketMessage::SubscriptionRequest`
 - `SubscriptionAccepted` - `iroha_data_model::events::EventSocketMessage::SubscriptionAccepted`
 - `Event` - `iroha_data_model::events::EventSocketMessage::Event`

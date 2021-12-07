@@ -32,6 +32,7 @@ use tokio::{sync::mpsc, time};
 use utils::{genesis, kura, kura::*, sumeragi, world};
 
 pub mod utils {
+    use iroha_core::genesis::RawGenesisBlock;
     use iroha_crypto::HashOf;
 
     use super::*;
@@ -53,9 +54,9 @@ pub mod utils {
 
         #[async_trait::async_trait]
         impl GenesisNetworkTrait for NoGenesis {
-            fn from_configuration<P: AsRef<Path> + Debug>(
+            fn from_configuration(
                 _submit_genesis: bool,
-                _block_path: P,
+                _block_path: RawGenesisBlock,
                 _genesis_config: &GenesisConfiguration,
                 _max_instructions_number: u64,
             ) -> Result<Option<Self>> {
@@ -69,6 +70,10 @@ pub mod utils {
                 _: Addr<IrohaNetwork>,
             ) -> Result<Topology> {
                 unreachable!()
+            }
+
+            fn genesis_submission_delay_ms(&self) -> u64 {
+                0
             }
         }
     }
@@ -122,7 +127,7 @@ pub mod utils {
 
             async fn handle(&mut self, StoreBlock(block): StoreBlock) -> Self::Result {
                 self.broker.issue_send(Stored(block.hash())).await;
-                self.wsv.apply(block).await;
+                self.wsv.apply(block).await.unwrap();
                 self.broker.issue_send(UpdateNetworkTopology).await;
                 self.broker.issue_send(ContinueSync).await;
             }
@@ -211,7 +216,7 @@ pub mod utils {
                 S: Deref<Target = Sumeragi<G, K, W>> + DerefMut + Send,
             {
                 let msg = if let SumeragiMessage::BlockCreated(mut block) = msg {
-                    block.block.as_mut_inner_v1().transactions = Vec::new();
+                    block.block.as_mut_v1().transactions = Vec::new();
                     SumeragiMessage::BlockCreated(block)
                 } else {
                     msg
@@ -410,8 +415,8 @@ pub mod utils {
                     self.init(last_block, height);
                 } else if let Some(genesis_network) = self.genesis_network.take() {
                     let addr = self.network.clone();
-                    if let Err(err) = genesis_network.submit_transactions(&mut self, addr).await {
-                        iroha_logger::error!("Failed to submit genesis transactions: {}", err)
+                    if let Err(error) = genesis_network.submit_transactions(self, addr).await {
+                        iroha_logger::error!(%error, "Failed to submit genesis transactions")
                     }
                 }
                 self.update_network_topology().await;
@@ -422,7 +427,6 @@ pub mod utils {
             Faulty: Handler<UpdateNetworkTopology, Result = ()>
                      + Handler<CommitBlock, Result = ()>
                      + Handler<GetNetworkTopology, Result = Topology>
-                     + Handler<GetSortedPeers, Result = Vec<PeerId>>
                      + Handler<IsLeader, Result = bool>
                      + Handler<GetLeader, Result = PeerId>
                      + Handler<Voting, Result = ()>
@@ -524,7 +528,7 @@ pub mod utils {
         use std::ops::{Deref, DerefMut};
 
         use iroha_core::{prelude::*, tx::Domain, wsv::WorldTrait};
-        use iroha_data_model::{prelude::*, world::World};
+        use iroha_data_model::prelude::*;
         use once_cell::sync::Lazy;
 
         #[derive(Debug, Clone, Default)]
@@ -532,7 +536,7 @@ pub mod utils {
 
         impl Deref for WithRoot {
             type Target = World;
-            fn deref(&self) -> &World {
+            fn deref(&self) -> &Self::Target {
                 &self.0
             }
         }
@@ -562,7 +566,7 @@ pub mod utils {
                 domains: impl IntoIterator<Item = (Name, Domain)>,
                 trusted_peers_ids: impl IntoIterator<Item = PeerId>,
             ) -> Self {
-                Self(iroha_data_model::world::World::with(
+                Self(World::with(
                     vec![(GLOBAL.name.clone(), GLOBAL.clone())]
                         .into_iter()
                         .chain(domains),
@@ -575,9 +579,7 @@ pub mod utils {
             let tx = Transaction::new(isi.into_iter().collect(), ROOT_ID.clone(), 100_000)
                 .sign(&ROOT_KEYS)
                 .unwrap();
-            let tx = VersionedAcceptedTransaction::from_transaction(tx, 4096).unwrap();
-            dbg!(tx.hash());
-            tx
+            VersionedAcceptedTransaction::from_transaction(tx, 4096).unwrap()
         }
     }
 }
@@ -616,13 +618,17 @@ where
     B: BlockSynchronizerTrait<Sumeragi = S, World = W>,
 {
     let tx = world::sign_tx(vec![]);
-    let leader = network.send(|iroha| &iroha.sumeragi, IsLeader).await;
+    let leader = network
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, IsLeader)
+        .await;
     let (_, peer) = leader
         .into_iter()
-        .zip(network.peers())
         .find(|(leader, _)| if to_leader { *leader } else { !*leader })
         .unwrap();
-    peer.iroha
+    network
+        .peer_by_id(&peer)
+        .unwrap()
+        .iroha
         .as_ref()
         .unwrap()
         .sumeragi
@@ -639,12 +645,14 @@ where
     B: BlockSynchronizerTrait<Sumeragi = S, World = W>,
 {
     let tx = world::sign_tx(vec![]);
-    let leader = network.send(|iroha| &iroha.sumeragi, IsLeader).await;
+    let leader = network
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, IsLeader)
+        .await;
     let (_, peer) = leader
         .into_iter()
-        .zip(network.peers())
         .find(|(leader, _)| if to_leader { *leader } else { !*leader })
         .unwrap();
+    let peer = network.peer_by_id(&peer).unwrap();
     peer.iroha
         .as_ref()
         .unwrap()
@@ -703,17 +711,19 @@ async fn change_view_on_commit_timeout() {
     blocks_applied(&mut channels, 0).await;
 
     let topologies = network
-        .send(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
         .await;
     let invalid_block_hashes = network
-        .send(|iroha| &iroha.sumeragi, sumeragi::InvalidBlocks)
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, sumeragi::InvalidBlocks)
         .await;
 
     network.send_all(StopSelf::Network).await;
 
-    for (topology, b) in topologies.into_iter().zip(invalid_block_hashes) {
+    for (topology, _) in topologies {
         assert_eq!(topology.view_change_proofs().len(), 1);
-        assert_eq!(b.len(), 1);
+    }
+    for (hashes, _) in invalid_block_hashes {
+        assert_eq!(hashes.len(), 1);
     }
 }
 
@@ -756,9 +766,9 @@ async fn change_view_on_tx_receipt_timeout() {
     blocks_applied(&mut channels, 0).await;
 
     let topologies = network
-        .send(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
         .await;
-    for topology in topologies {
+    for (topology, _) in topologies {
         assert_eq!(topology.view_change_proofs().len(), 1);
     }
 }
@@ -788,10 +798,10 @@ async fn change_view_on_block_creation_timeout() {
     blocks_applied(&mut channels, 0).await;
 
     let topologies = network
-        .send(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
         .await;
 
-    for topology in topologies {
+    for (topology, _) in topologies {
         assert_eq!(topology.view_change_proofs().len(), 1);
     }
 }
@@ -814,21 +824,22 @@ async fn not_enough_votes() {
         .map(|peer| peer.broker.subscribe_with_channel::<Stored>())
         .collect::<Vec<_>>();
 
-    // send to not leader
     start_round_with_tx(&network, true).await;
     time::sleep(Duration::from_secs(2)).await;
 
     blocks_applied(&mut channels, 0).await;
 
     let topologies = network
-        .send(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, sumeragi::NetworkTopology)
         .await;
     let invalid_block_hashes = network
-        .send(|iroha| &iroha.sumeragi, sumeragi::InvalidBlocks)
+        .send_to_actor_on_peers(|iroha| &iroha.sumeragi, sumeragi::InvalidBlocks)
         .await;
 
-    for (topology, b) in topologies.into_iter().zip(invalid_block_hashes) {
+    for (topology, _) in topologies {
         assert_eq!(topology.view_change_proofs().len(), 1);
-        assert_eq!(b.len(), 1);
+    }
+    for (hashes, _) in invalid_block_hashes {
+        assert_eq!(hashes.len(), 1);
     }
 }

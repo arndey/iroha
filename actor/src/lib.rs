@@ -1,6 +1,5 @@
-//!
 //! Iroha simple actor framework.
-//!
+#![allow(clippy::same_name_method)]
 
 #[cfg(feature = "deadlock_detection")]
 use std::any::type_name;
@@ -52,6 +51,7 @@ pub mod prelude {
 #[derive(Debug)]
 pub struct Addr<A: Actor> {
     sender: mpsc::Sender<Envelope<A>>,
+
     #[cfg(feature = "deadlock_detection")]
     actor_id: ActorId,
 }
@@ -127,8 +127,10 @@ impl<A: Actor> Addr<A> {
     }
 
     /// Send a message and wait for an answer.
+    ///
     /// # Errors
     /// Fails if no one will send message
+    ///
     /// # Panics
     /// If queue is full
     pub async fn send<M>(&self, message: M) -> Result<M::Result, Error>
@@ -147,9 +149,8 @@ impl<A: Actor> Addr<A> {
         }
     }
 
-    //FIXME: In fact this method still waits for an answer and just drops it, this should be corrected.
-    // Waiting for the answer introduces deadlock possibilities!
     /// Send a message without waiting for an answer.
+    ///
     /// # Errors
     /// Fails if queue is full or actor is disconnected
     pub async fn do_send<M>(&self, message: M)
@@ -160,12 +161,15 @@ impl<A: Actor> Addr<A> {
     {
         let envelope = SyncEnvelopeProxy::pack(message, None);
         let sender = self.sender.clone();
-        tokio::task::spawn(async move {
-            // TODO: propagate the error.
-            if let Err(error) = sender.send(envelope).await {
-                iroha_logger::error!("Error sending actor message: {}", &error);
+        // TODO: BUG: remove deadlock from iroha (probably issue inside of `iroha_p2p` crate) and remove this task::spawn
+        tokio::spawn(
+            async move {
+                if let Err(error) = sender.send(envelope).await {
+                    iroha_logger::error!(%error, "Error sending actor message");
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     /// Constructs recipient for sending only specific messages (without answers)
@@ -289,10 +293,14 @@ pub trait Actor: Send + Sized + 'static {
     }
 
     /// At start hook of actor
-    async fn on_start(&mut self, _ctx: &mut Context<Self>) {}
+    async fn on_start(&mut self, ctx: &mut Context<Self>) {
+        let _ = ctx;
+    }
 
     /// At stop hook of actor
-    async fn on_stop(&mut self, _ctx: &mut Context<Self>) {}
+    async fn on_stop(&mut self, ctx: &mut Context<Self>) {
+        let _ = ctx;
+    }
 
     /// Initialize actor with its address.
     fn preinit(self) -> InitializedActor<Self> {
@@ -381,7 +389,7 @@ impl<A: Actor> InitializedActor<A> {
                     }
                 }
             }
-            iroha_logger::error!(actor = std::any::type_name::<A>(), "Actor stopped");
+            iroha_logger::error!(actor = %std::any::type_name::<A>(), "Actor stopped");
             actor.on_stop(&mut ctx).await;
         }
         .in_current_span();
@@ -498,18 +506,8 @@ impl<A: Actor> Context<A> {
         self.addr().recipient()
     }
 
-    /// Sends actor specified message
-    pub fn notify<M>(&self, message: M)
-    where
-        M: Message<Result = ()> + Send + 'static,
-        A: ContextHandler<M>,
-    {
-        let addr = self.addr();
-        task::spawn(async move { addr.do_send(message).await }.in_current_span());
-    }
-
     /// Sends actor specified message in some time
-    pub fn notify_later<M>(&self, message: M, later: Duration)
+    pub fn notify<M>(&self, message: M, later: Duration)
     where
         M: Message<Result = ()> + Send + 'static,
         A: ContextHandler<M>,
@@ -544,25 +542,6 @@ impl<A: Actor> Context<A> {
 
     /// Notifies actor with items from stream
     pub fn notify_with<M, S>(&self, stream: S)
-    where
-        M: Message<Result = ()> + Send + 'static,
-        S: Stream<Item = M> + Send + 'static,
-        A: ContextHandler<M>,
-    {
-        let addr = self.addr();
-        task::spawn(
-            async move {
-                futures::pin_mut!(stream);
-                while let Some(item) = stream.next().await {
-                    addr.do_send(item).await;
-                }
-            }
-            .in_current_span(),
-        );
-    }
-
-    /// Notifies actor with items from stream
-    pub fn notify_with_context<M, S>(&self, stream: S)
     where
         M: Message<Result = ()> + Send + 'static,
         S: Stream<Item = M> + Send + 'static,

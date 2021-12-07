@@ -11,14 +11,12 @@ use std::{
 
 use dashmap::{DashMap, DashSet};
 use eyre::{eyre, Result};
-use futures::{future, prelude::*, stream::futures_unordered::FuturesUnordered};
-use iroha_actor::{broker::*, prelude::*};
+use futures::{prelude::*, stream::FuturesUnordered};
+use iroha_actor::{broker::*, prelude::*, Context};
 use iroha_crypto::{HashOf, KeyPair};
-use iroha_data_model::{
-    current_time, events::Event, peer::Id as PeerId, transaction::VersionedTransaction,
-};
-use iroha_logger::Instrument;
-use iroha_p2p::ConnectPeer;
+use iroha_data_model::prelude::*;
+use iroha_logger::{prelude::*, Instrument};
+use iroha_p2p::{ConnectPeer, DisconnectPeer};
 use network_topology::{Role, Topology};
 use rand::prelude::SliceRandom;
 use tokio::{sync::RwLock, task, time};
@@ -61,7 +59,7 @@ pub struct Voting;
 #[derive(Debug, Clone, Copy, Default, iroha_actor::Message)]
 pub struct Gossip;
 
-/// Message reminder for peer (re)connection.
+/// Message reminder for peer (re/dis)connection.
 #[derive(Debug, Clone, Copy, Default, iroha_actor::Message)]
 pub struct ConnectPeers;
 
@@ -77,11 +75,6 @@ pub struct Init {
     /// Height of merkle tree
     pub height: u64,
 }
-
-/// Get sorted peers
-#[derive(Debug, Clone, Copy, iroha_actor::Message)]
-#[message(result = "Vec<PeerId>")]
-pub struct GetSortedPeers;
 
 /// Get network topology
 #[derive(Debug, Clone, iroha_actor::Message)]
@@ -131,7 +124,7 @@ where
     pub genesis_network: Option<G>,
     /// Broker
     pub broker: Broker,
-    /// [`Kura`] actor address
+    /// [`Kura`](crate::kura) actor address
     pub kura: AlwaysAddr<K>,
     /// [`iroha_p2p::Network`] actor address
     pub network: Addr<IrohaNetwork>,
@@ -147,7 +140,6 @@ pub trait SumeragiTrait:
     + ContextHandler<Init, Result = ()>
     + ContextHandler<CommitBlock, Result = ()>
     + ContextHandler<GetNetworkTopology, Result = Topology>
-    + ContextHandler<GetSortedPeers, Result = Vec<PeerId>>
     + ContextHandler<IsLeader, Result = bool>
     + ContextHandler<GetLeader, Result = PeerId>
     + ContextHandler<NetworkMessage, Result = ()>
@@ -247,7 +239,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait<World = W>, W: WorldTrait> SumeragiTra
 pub const TX_RETRIEVAL_INTERVAL: Duration = Duration::from_millis(200);
 /// The interval at which sumeragi forwards txs from `queue` to other peers.
 pub const TX_GOSSIP_INTERVAL: Duration = Duration::from_millis(100);
-/// The interval of peers (re)connection.
+/// The interval of peers (re/dis)connection.
 pub const PEERS_CONNECT_INTERVAL: Duration = Duration::from_secs(1);
 /// The interval of telemetry updates.
 pub const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -280,10 +272,10 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<UpdateNetworkT
 #[async_trait::async_trait]
 impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<Message> for Sumeragi<G, K, W> {
     type Result = ();
-    async fn handle(&mut self, message: Message) {
-        iroha_logger::trace!(role=?self.topology.role(&self.peer_id), msg=?message);
-        if let Err(error) = message.handle(&mut self).await {
-            iroha_logger::error!(%error, "Handle message failed");
+    async fn handle(&mut self, msg: Message) {
+        trace!(peer_role=?self.topology.role(&self.peer_id), ?msg);
+        if let Err(error) = msg.handle(self).await {
+            error!(%error, "Handle message failed");
         }
     }
 }
@@ -297,7 +289,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<Voting> for Su
         }
         let txs = self.queue.get_transactions_for_block(&*self.wsv);
         if let Err(error) = self.round(txs).await {
-            iroha_logger::error!(%error, "Round failed");
+            error!(%error, "Round failed");
         }
     }
 }
@@ -355,15 +347,15 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> ContextHandler<Init>
 {
     type Result = ();
     async fn handle(&mut self, ctx: &mut Context<Self>, Init { last_block, height }: Init) {
-        iroha_logger::info!("Starting Sumeragi");
+        info!("Starting Sumeragi");
         self.connect_peers().await;
 
         if height != 0 && *last_block != Hash([0; 32]) {
             self.init(last_block, height);
         } else if let Some(genesis_network) = self.genesis_network.take() {
             let addr = self.network.clone();
-            if let Err(err) = genesis_network.submit_transactions(&mut self, addr).await {
-                iroha_logger::error!(%err, "Failed to submit genesis transactions")
+            if let Err(error) = genesis_network.submit_transactions(self, addr).await {
+                error!(%error, "Failed to submit genesis transactions")
             }
         }
         self.update_network_topology().await;
@@ -377,21 +369,11 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> ContextHandler<Init>
 }
 
 #[async_trait::async_trait]
-impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<GetSortedPeers>
-    for Sumeragi<G, K, W>
-{
-    type Result = Vec<PeerId>;
-    async fn handle(&mut self, GetSortedPeers: GetSortedPeers) -> Vec<PeerId> {
-        self.topology.sorted_peers().to_vec()
-    }
-}
-
-#[async_trait::async_trait]
 impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<GetNetworkTopology>
     for Sumeragi<G, K, W>
 {
     type Result = Topology;
-    async fn handle(&mut self, GetNetworkTopology(header): GetNetworkTopology) -> Topology {
+    async fn handle(&mut self, GetNetworkTopology(header): GetNetworkTopology) -> Self::Result {
         self.network_topology_current_or_genesis(&header)
     }
 }
@@ -414,7 +396,7 @@ pub struct IsLeader;
 #[async_trait::async_trait]
 impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<IsLeader> for Sumeragi<G, K, W> {
     type Result = bool;
-    async fn handle(&mut self, IsLeader: IsLeader) -> bool {
+    async fn handle(&mut self, IsLeader: IsLeader) -> Self::Result {
         self.is_leader()
     }
 }
@@ -427,7 +409,7 @@ pub struct GetLeader;
 #[async_trait::async_trait]
 impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<GetLeader> for Sumeragi<G, K, W> {
     type Result = PeerId;
-    async fn handle(&mut self, GetLeader: GetLeader) -> PeerId {
+    async fn handle(&mut self, GetLeader: GetLeader) -> Self::Result {
         self.topology.leader().clone()
     }
 }
@@ -442,8 +424,8 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Handler<NetworkMessage
         use NetworkMessage::*;
 
         match msg {
-            SumeragiMessage(data) => self.broker.issue_send(data.into_inner_v1()).await,
-            BlockSync(data) => self.broker.issue_send(data.into_inner_v1()).await,
+            SumeragiMessage(data) => self.broker.issue_send(data.into_v1()).await,
+            BlockSync(data) => self.broker.issue_send(data.into_v1()).await,
             Health => {}
         }
     }
@@ -457,7 +439,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
     }
 
     /// Updates network topology by taking the actual list of peers from `WorldStateView`.
-    /// Updates it only if the new peers were added, otherwise leaves the order unchanged.
+    /// Updates it only if there is a change in WSV peers, otherwise leaves the order unchanged.
     #[allow(clippy::expect_used)]
     pub async fn update_network_topology(&mut self) {
         let wsv_peers: HashSet<_> = self.wsv.trusted_peers_ids().clone().into_iter().collect();
@@ -512,7 +494,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
     /// * peer is not leader
     /// * there are already some blocks in blockchain
     #[iroha_futures::telemetry_future]
-    #[iroha_logger::log(skip(self, transactions, genesis_topology))]
+    #[log(skip(self, transactions, genesis_topology))]
     pub async fn start_genesis_round(
         &mut self,
         transactions: Vec<VersionedAcceptedTransaction>,
@@ -549,7 +531,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
             return Ok(());
         }
 
-        if let Role::Leader = self.topology.role(&self.peer_id) {
+        if Role::Leader == self.topology.role(&self.peer_id) {
             let block = PendingBlock::new(transactions).chain(
                 self.block_height,
                 *self.latest_block_hash(),
@@ -568,17 +550,15 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
         msg: impl Into<Message> + Send,
         ids: impl Iterator<Item = &PeerId> + Send,
     ) {
-        let msg = VersionedMessage::from(msg.into());
-        ids.map(|id| msg.clone().send_to(&self.broker, id))
-            .collect::<FuturesUnordered<_>>()
-            .collect::<()>()
-            .await
+        VersionedMessage::from(msg.into())
+            .send_to_multiple(&self.broker, ids)
+            .await;
     }
 
     /// Forwards transactions to the leader and waits for receipts.
     #[iroha_futures::telemetry_future]
     pub async fn forward_txs_to_leader(&mut self, txs: &[VersionedAcceptedTransaction]) {
-        let mut send_futures = Vec::new();
+        let send_futures = FuturesUnordered::new();
         for tx in txs {
             let tx_hash = tx.hash();
             if self.txs_awaiting_receipts.contains_key(&tx_hash) {
@@ -586,12 +566,12 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
                 // Without this `if` depending on the round time, the peers might DOS themselves.
                 continue;
             }
-            iroha_logger::info!(
-                "{:?} - {} - Forwarding tx to leader({}). Transaction hash: {}",
-                self.topology.role(&self.peer_id),
-                self.peer_id.address,
-                self.topology.leader().address,
-                tx_hash,
+            info!(
+                peer_addr = %self.peer_id.address,
+                peer_role = ?self.topology.role(&self.peer_id),
+                leader_addr = %self.topology.leader().address,
+                %tx_hash,
+                "Forwarding tx to leader"
             );
             send_futures.push(
                 VersionedMessage::from(Message::from(TransactionForwarded::new(tx, &self.peer_id)))
@@ -612,47 +592,42 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
             )
             .expect("Failed to put first signature.");
 
-            let recipient_peers = self.topology.sorted_peers().to_vec();
-            let peer_id = self.peer_id.clone();
-            let tx_receipt_time = self.tx_receipt_time;
             let broker = self.broker.clone();
+            let tx_receipt_time = self.tx_receipt_time;
+            let recipient_peers: Vec<_> = self
+                .topology
+                .sorted_peers()
+                .iter()
+                .filter(|&p| p != &self.peer_id)
+                .cloned()
+                .collect();
+
             task::spawn(
                 async move {
                     time::sleep(tx_receipt_time).await;
                     if txs_awaiting_receipts.contains_key(&tx_hash) {
-                        iroha_logger::warn!(
-                            "Transaction receipt timeout detected! Transaction hash: {}",
-                            tx_hash
+                        warn!(
+                            %tx_hash,
+                            "Transaction receipt timeout detected!",
                         );
-                        let mut send_futures = Vec::new();
-                        for peer in &recipient_peers {
-                            if *peer != peer_id {
-                                send_futures.push(
-                                    VersionedMessage::from(Message::ViewChangeSuggested(
-                                        no_tx_receipt.clone().into(),
-                                    ))
-                                    .send_to(&broker, peer),
-                                );
-                            }
-                        }
-                        future::join_all(send_futures).await;
+
+                        VersionedMessage::from(Message::ViewChangeSuggested(
+                            no_tx_receipt.clone().into(),
+                        ))
+                        .send_to_multiple(&broker, &recipient_peers)
+                        .await;
                     }
                 }
                 .in_current_span(),
             );
         }
-        future::join_all(send_futures).await;
+        send_futures.collect::<()>().await;
     }
 
     async fn broadcast_msg(&self, msg: impl Into<Message> + Send) {
         let msg = VersionedMessage::from(msg.into());
-        self.topology
-            .sorted_peers()
-            .iter()
-            .map(|peer| msg.clone().send_to(&self.broker, peer))
-            .collect::<FuturesUnordered<_>>()
-            .collect::<()>()
-            .await
+        msg.send_to_multiple(&self.broker, self.topology.sorted_peers())
+            .await;
     }
 
     async fn broadcast_msgs(&self, msgs: impl IntoIterator<Item = impl Into<Message>> + Send) {
@@ -661,14 +636,11 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
             .map(Into::into)
             .map(VersionedMessage::from)
             .collect::<Vec<_>>();
+
         let peers = self.topology.sorted_peers();
-        peers
-            .iter()
-            .flat_map(|peer| msgs.clone().into_iter().map(move |msg| (peer, msg)))
-            .map(|(peer, msg)| msg.send_to(&self.broker, peer))
-            .collect::<FuturesUnordered<_>>()
-            .collect::<()>()
-            .await;
+        for msg in msgs {
+            msg.send_to_multiple(&self.broker, peers).await;
+        }
     }
 
     /// Gossip transactions to other peers.
@@ -678,10 +650,10 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
             return;
         }
 
-        iroha_logger::debug!(
-            role = ?self.topology.role(&self.peer_id),
-            "Gossiping transactions. Number of transactions to forward: {}",
-            txs.len(),
+        debug!(
+            peer_role = ?self.topology.role(&self.peer_id),
+            tx_count = txs.len(),
+            "Gossiping transactions"
         );
 
         self.broadcast_msgs(
@@ -703,13 +675,13 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
             &self.is_query_allowed,
         );
         let network_topology = self.network_topology_current_or_genesis(block.header());
-        iroha_logger::info!(
-            role = ?network_topology.role(&self.peer_id),
-            hash = %block.hash(),
+        info!(
+            peer_role = ?network_topology.role(&self.peer_id),
+            block_hash = %block.hash(),
             "Created a block",
         );
         for event in Vec::<Event>::from(&block) {
-            iroha_logger::info!(?event, "Event happened");
+            info!(?event);
             drop(self.events_sender.send(event));
         }
         if !network_topology.is_consensus_required() {
@@ -732,7 +704,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
 
     /// Starts countdown for a period in which the `voting_block` should be committed.
     #[iroha_futures::telemetry_future]
-    #[iroha_logger::log(skip(self, voting_block))]
+    #[log(skip(self, voting_block))]
     pub async fn start_commit_countdown(
         &self,
         voting_block: VotingBlock,
@@ -740,34 +712,41 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
         latest_view_change: HashOf<Proof>,
     ) {
         let old_voting_block = voting_block;
-        let voting_block = Arc::clone(&self.voting_block);
+        let voting_blck = Arc::clone(&self.voting_block);
         let key_pair = self.key_pair.clone();
-        let recipient_peers = self.topology.sorted_peers().to_vec();
-        let peer_id = self.peer_id.clone();
         let commit_time = self.commit_time;
         let broker = self.broker.clone();
+        let recipient_peers: Vec<_> = self
+            .topology
+            .sorted_peers()
+            .iter()
+            .filter(|&p| p != &self.peer_id)
+            .cloned()
+            .collect();
+
         task::spawn(
             async move {
                 time::sleep(commit_time).await;
-                let voting_block = if let Some(voting_block) = voting_block.write().await.clone() {
-                    voting_block
+                let voter_block = if let Some(this_voting_block) = voting_blck.write().await.clone()
+                {
+                    this_voting_block
                 } else {
                     return;
                 };
 
                 // If the block was not yet committed send commit timeout to other peers to initiate view change.
-                if voting_block.block.hash() != old_voting_block.block.hash() {
+                if voter_block.block.hash() != old_voting_block.block.hash() {
                     return;
                 }
 
-                iroha_logger::warn!(
-                    "Block commit timeout detected! Voting block hash: {}",
-                    voting_block.block.hash()
+                warn!(
+                    block_hash = %voter_block.block.hash(),
+                    "Block commit timeout detected!",
                 );
                 #[allow(clippy::expect_used)]
-                let message = VersionedMessage::from(Message::ViewChangeSuggested(
+                let msg = VersionedMessage::from(Message::ViewChangeSuggested(
                     view_change::Proof::commit_timeout(
-                        voting_block.block.hash(),
+                        voter_block.block.hash(),
                         latest_view_change,
                         latest_block,
                         key_pair.clone(),
@@ -775,20 +754,15 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
                     .expect("Failed to sign CommitTimeout")
                     .into(),
                 ));
-                let mut send_futures = Vec::new();
-                for peer in &recipient_peers {
-                    if *peer != peer_id {
-                        send_futures.push(message.clone().send_to(&broker, peer));
-                    }
-                }
-                future::join_all(send_futures).await;
+
+                msg.send_to_multiple(&broker, &recipient_peers).await;
             }
             .in_current_span(),
         );
     }
 
     /// Commits `ValidBlock` and changes the state of the `Sumeragi` and its `NetworkTopology`.
-    #[iroha_logger::log(skip(self, block))]
+    #[log(skip(self, block))]
     #[iroha_futures::telemetry_future]
     pub async fn commit_block(&mut self, block: VersionedValidBlock) {
         self.invalidated_blocks_hashes.clear();
@@ -800,7 +774,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
         let block_hash = block.hash();
 
         for event in Vec::<Event>::from(&block) {
-            iroha_logger::info!(?event, "Event happened");
+            info!(?event);
             drop(self.events_sender.send(event));
         }
 
@@ -808,12 +782,12 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
 
         let previous_role = self.topology.role(&self.peer_id);
         self.topology.apply_block(block_hash);
-        iroha_logger::info!(
-            "{:?} - Commiting block with hash {}. New role: {:?}. New height: {}",
-            previous_role,
-            block_hash,
-            self.topology.role(&self.peer_id),
-            self.block_height,
+        info!(
+            prev_peer_role = ?previous_role,
+            new_peer_role = ?self.topology.role(&self.peer_id),
+            new_block_height = %self.block_height,
+            %block_hash,
+            "Committing block"
         );
         *self.voting_block.write().await = None;
         self.votes_for_blocks.clear();
@@ -828,19 +802,19 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
         self.txs_awaiting_created_block.clear();
         self.txs_awaiting_receipts.clear();
         let previous_role = self.topology.role(&self.peer_id);
-        if let Some(invalidated_block_hash) = invalidated_block_hash {
-            self.invalidated_blocks_hashes.push(invalidated_block_hash)
+        if let Some(hash) = invalidated_block_hash {
+            self.invalidated_blocks_hashes.push(hash)
         }
         self.topology.apply_view_change(proof.clone());
         *self.voting_block.write().await = None;
-        iroha_logger::info!(
-            "{} - {:?} - Changing view at block with hash {}. New role: {:?}. Number of view changes (including this): {}. Reason for a view change: {}",
-            self.peer_id.address,
-            previous_role,
-            self.latest_block_hash(),
-            self.topology.role(&self.peer_id),
-            self.number_of_view_changes(),
-            proof.reason()
+        info!(
+            peer_addr = %self.peer_id.address,
+            prev_peer_role = ?previous_role,
+            new_peer_role = ?self.topology.role(&self.peer_id),
+            block_hash = %self.latest_block_hash(),
+            view_changes_count = %self.number_of_view_changes(),
+            reason = %proof.reason(),
+            "Changing view at block",
         );
     }
 
@@ -853,7 +827,7 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
     pub fn network_topology_current_or_genesis(&self, header: &BlockHeader) -> Topology {
         if header.is_genesis() && self.block_height == 0 {
             if let Some(genesis_topology) = &header.genesis_topology {
-                iroha_logger::info!("Using network topology from genesis block.");
+                info!("Using network topology from genesis block");
                 return genesis_topology.clone();
             }
         }
@@ -861,31 +835,42 @@ impl<G: GenesisNetworkTrait, K: KuraTrait, W: WorldTrait> Sumeragi<G, K, W> {
         self.topology.clone()
     }
 
-    /// Connects all peers from current network topology.
+    /// Connects or disconnects peers according to the current network topology.
     pub async fn connect_peers(&self) {
-        iroha_logger::debug!("Connecting peers...");
-        let mut peers = self.topology.sorted_peers().to_owned();
-        let self_address = self.peer_id.address.clone();
+        trace!("Connecting peers...");
+        let peers_expected = {
+            let mut res = self.topology.sorted_peers().to_owned();
+            res.retain(|id| id.address != self.peer_id.address);
+            res.shuffle(&mut rand::thread_rng());
+            res
+        };
 
         #[allow(clippy::expect_used)]
         let peers_online = self
             .network
             .send(iroha_p2p::network::GetConnectedPeers)
             .await
-            .expect("Could not get connected peers from Network!")
+            .expect("Failed to get connected peers from the network")
             .peers;
 
+        for peer_to_be_connected in peers_expected
+            .iter()
+            .filter(|id| !peers_online.contains(&id.public_key))
         {
-            let mut rng = rand::thread_rng();
-            peers.shuffle(&mut rng);
+            info!(%peer_to_be_connected.address, "Connecting peer");
+            self.broker
+                .issue_send(ConnectPeer {
+                    address: peer_to_be_connected.address.clone(),
+                })
+                .await
         }
-        for peer in peers {
-            if peer.address == self_address || peers_online.contains(&peer.public_key) {
-                continue;
-            }
-            iroha_logger::info!("Connecting {}", &peer.address);
-            let connect = ConnectPeer { id: peer.clone() };
-            self.broker.issue_send(connect).await;
+        for peer_to_be_disconnected in
+            peers_online.difference(&peers_expected.into_iter().map(|id| id.public_key).collect())
+        {
+            info!(%peer_to_be_disconnected, "Disconnecting peer");
+            self.broker
+                .issue_send(DisconnectPeer(peer_to_be_disconnected.clone()))
+                .await
         }
     }
 }
@@ -933,12 +918,14 @@ pub mod message {
     };
 
     use eyre::{Result, WrapErr};
+    use futures::{prelude::*, stream::FuturesUnordered};
     use iroha_actor::broker::Broker;
     use iroha_crypto::{HashOf, KeyPair, SignatureOf};
     use iroha_data_model::prelude::*;
-    use iroha_derive::*;
-    use iroha_logger::Instrument;
+    use iroha_logger::{prelude::*, Instrument};
+    use iroha_macro::*;
     use iroha_p2p::Post;
+    use iroha_schema::IntoSchema;
     use iroha_version::prelude::*;
     use parity_scale_codec::{Decode, Encode};
     use tokio::{task, time};
@@ -953,27 +940,27 @@ pub mod message {
         VersionedAcceptedTransaction, VersionedValidBlock,
     };
 
-    declare_versioned_with_scale!(VersionedMessage 1..2, Debug, Clone, iroha_derive::FromVariant, iroha_actor::Message);
+    declare_versioned_with_scale!(VersionedMessage 1..2, Debug, Clone, iroha_macro::FromVariant, iroha_actor::Message);
 
     impl VersionedMessage {
-        /// Same as [`as_v1`](`VersionedMessage::as_v1()`) but also does conversion
-        pub const fn as_inner_v1(&self) -> &Message {
+        /// Converts from `&VersionedMessage` to V1 reference
+        pub const fn as_v1(&self) -> &Message {
             match self {
-                Self::V1(v1) => &v1.0,
+                Self::V1(v1) => v1,
             }
         }
 
-        /// Same as [`as_inner_v1`](`VersionedMessage::as_inner_v1()`) but returns mutable reference
-        pub fn as_mut_inner_v1(&mut self) -> &mut Message {
+        /// Converts from `&mut VersionedMessage` to V1 mutable reference
+        pub fn as_mut_v1(&mut self) -> &mut Message {
             match self {
-                Self::V1(v1) => &mut v1.0,
+                Self::V1(v1) => v1,
             }
         }
 
-        /// Same as [`into_v1`](`VersionedMessage::into_v1()`) but also does conversion
-        pub fn into_inner_v1(self) -> Message {
+        /// Performs the conversion from `VersionedMessage` to V1
+        pub fn into_v1(self) -> Message {
             match self {
-                Self::V1(v1) => v1.0,
+                Self::V1(v1) => v1,
             }
         }
 
@@ -985,9 +972,25 @@ pub mod message {
         pub async fn send_to(self, broker: &Broker, peer: &PeerId) {
             let post = Post {
                 data: NetworkMessage::SumeragiMessage(Box::new(self)),
-                id: peer.clone(),
+                peer: peer.clone(),
             };
             broker.issue_send(post).await;
+        }
+
+        /// Send this message over the network to multiple `peers`.
+        /// # Errors
+        /// Fails if network sending fails
+        pub async fn send_to_multiple<'a, I>(self, broker: &Broker, peers: I)
+        where
+            I: IntoIterator<Item = &'a PeerId> + Send,
+        {
+            let futures = peers
+                .into_iter()
+                .map(|peer| self.clone().send_to(broker, peer))
+                .collect::<FuturesUnordered<_>>()
+                .collect::<()>();
+
+            futures.await;
         }
 
         /// Handles this message as part of `Sumeragi` consensus.
@@ -998,12 +1001,12 @@ pub mod message {
             self,
             sumeragi: &mut Sumeragi<G, K, W>,
         ) -> Result<()> {
-            self.into_inner_v1().handle(sumeragi).await
+            self.into_v1().handle(sumeragi).await
         }
     }
 
     /// Message's variants that are used by peers to communicate in the process of consensus.
-    #[version_with_scale(n = 1, versioned = "VersionedMessage", derive = "Debug, Clone")]
+    #[version_with_scale(n = 1, versioned = "VersionedMessage")]
     #[derive(Io, Decode, Encode, Debug, Clone, FromVariant, iroha_actor::Message)]
     pub enum Message {
         /// Is sent by leader to all validating peers, when a new block is created.
@@ -1121,9 +1124,9 @@ pub mod message {
             sumeragi: &Sumeragi<G, K, W>,
         ) -> bool {
             let voting_block = sumeragi.voting_block.read().await.clone();
-            voting_block.map_or(false, |voting_block| {
-                voting_block.block.hash() == reason.hash
-                    && (current_time() - voting_block.voted_at) >= sumeragi.commit_time
+            voting_block.map_or(false, |voter_block| {
+                voter_block.block.hash() == reason.hash
+                    && (current_time() - voter_block.voted_at) >= sumeragi.commit_time
             })
         }
 
@@ -1166,14 +1169,9 @@ pub mod message {
         }
 
         async fn send_to_all(&self, broker: &Broker, peers: HashSet<PeerId>) {
-            let view_change_suggested =
-                VersionedMessage::from(Message::ViewChangeSuggested(self.clone()));
-            futures::future::join_all(
-                peers
-                    .iter()
-                    .map(|peer| view_change_suggested.clone().send_to(broker, peer)),
-            )
-            .await;
+            VersionedMessage::from(Message::ViewChangeSuggested(self.clone()))
+                .send_to_multiple(broker, &peers)
+                .await;
         }
     }
 
@@ -1205,7 +1203,11 @@ pub mod message {
                     sumeragi.latest_block_hash(),
                 )
             {
-                iroha_logger::info!("Updating number of view changes on BlockCreated from leader. Number of view changes {} -> {}", sumeragi.topology.view_change_proofs().len(), leader_view_changes.len());
+                iroha_logger::info!(
+                    prev_view_changes_count = sumeragi.topology.view_change_proofs().len(),
+                    new_view_changes_count = leader_view_changes.len(),
+                    "Updating number of view changes on BlockCreated from leader"
+                );
                 sumeragi.topology = sumeragi
                     .topology
                     .clone()
@@ -1231,7 +1233,7 @@ pub mod message {
             }
 
             for event in Vec::<Event>::from(&self.block) {
-                iroha_logger::info!(?event, "Event happened");
+                iroha_logger::info!(?event);
                 drop(sumeragi.events_sender.send(event));
             }
             self.update_view_changes(sumeragi);
@@ -1277,9 +1279,9 @@ pub mod message {
                     .send_to(&sumeragi.broker, network_topology.proxy_tail())
                     .await;
                 iroha_logger::info!(
-                    role = ?network_topology.role(&sumeragi.peer_id),
-                    "Signed block candidate with hash {}.",
-                    self.block.hash(),
+                    peer_role = ?network_topology.role(&sumeragi.peer_id),
+                    block_hash = %self.block.hash(),
+                    "Signed block candidate",
                 );
                 //TODO: send to set b so they can observe
             }
@@ -1330,7 +1332,7 @@ pub mod message {
                 .votes_for_blocks
                 .entry(block_hash)
                 .or_insert_with(|| self.block.clone());
-            entry.as_mut_inner_v1().signatures.extend(
+            entry.as_mut_v1().signatures.extend(
                 self.block
                     .verified_signatures()
                     .cloned()
@@ -1342,11 +1344,11 @@ pub mod message {
             );
 
             iroha_logger::info!(
-                role = ?network_topology.role(&sumeragi.peer_id),
-                "Received a vote for block with hash {}. Now it has {} signatures out of {} required (not counting ProxyTail signature).",
-                block_hash,
-                valid_signatures.len(),
-                network_topology.min_votes_for_commit() - 1,
+                peer_role = ?network_topology.role(&sumeragi.peer_id),
+                %block_hash,
+                valid_signatures_count = valid_signatures.len(),
+                required_signatures_count = network_topology.min_votes_for_commit() - 1,
+                "Received a vote for block",
             );
 
             if valid_signatures.len() < network_topology.min_votes_for_commit() as usize - 1 {
@@ -1358,13 +1360,13 @@ pub mod message {
                 .map(SignatureOf::transmute)
                 .collect();
             let mut block = entry.clone();
-            block.as_mut_inner_v1().signatures = signatures;
+            block.as_mut_v1().signatures = signatures;
             let block = block.sign(sumeragi.key_pair.clone())?;
 
             iroha_logger::info!(
-                role = ?network_topology.role(&sumeragi.peer_id),
-                "Block reached required number of votes. Block hash {}.",
-                block_hash,
+                peer_role = ?network_topology.role(&sumeragi.peer_id),
+                %block_hash,
+                "Block reached required number of votes",
             );
 
             sumeragi
@@ -1426,9 +1428,9 @@ pub mod message {
                 && sumeragi.latest_block_hash() == &self.block.header().previous_block_hash
             {
                 let mut block = self.block.clone();
-                block.as_mut_inner_v1().signatures.clear();
+                block.as_mut_v1().signatures.clear();
                 block
-                    .as_mut_inner_v1()
+                    .as_mut_v1()
                     .signatures
                     .extend(valid_signatures.into_iter().map(SignatureOf::transmute));
                 sumeragi.commit_block(block).await;
@@ -1496,7 +1498,7 @@ pub mod message {
     }
 
     /// `Message` structure describing a receipt sent by the leader to the peer it got this transaction from.
-    #[derive(Io, Decode, Encode, Debug, Clone)]
+    #[derive(Io, Decode, Encode, Debug, Clone, IntoSchema)]
     #[non_exhaustive]
     pub struct TransactionReceipt {
         /// The hash of the transaction that the leader received.
@@ -1582,15 +1584,11 @@ pub mod message {
                         return;
                     }
 
-                    iroha_logger::warn!("Block creation timeout detected!");
-                    let block_creation_timeout_message = VersionedMessage::from(
-                        Message::ViewChangeSuggested(block_creation_timeout.into()),
-                    );
-                    futures::future::join_all(recipient_peers.iter().map(|peer| {
-                        block_creation_timeout_message
-                            .clone()
-                            .send_to(&broker, peer)
-                    }))
+                    iroha_logger::warn!(?block_time, "Block creation timeout detected!");
+                    VersionedMessage::from(Message::ViewChangeSuggested(
+                        block_creation_timeout.into(),
+                    ))
+                    .send_to_multiple(&broker, &recipient_peers)
                     .await;
                 }
                 .in_current_span(),
@@ -1611,8 +1609,8 @@ pub mod config {
     use serde::{Deserialize, Serialize};
 
     const DEFAULT_BLOCK_TIME_MS: u64 = 1000;
-    const DEFAULT_COMMIT_TIME_MS: u64 = 1000;
-    const DEFAULT_TX_RECEIPT_TIME_MS: u64 = 200;
+    const DEFAULT_COMMIT_TIME_MS: u64 = 2000;
+    const DEFAULT_TX_RECEIPT_TIME_MS: u64 = 500;
     const DEFAULT_MAX_INSTRUCTION_NUMBER: u64 = 2_u64.pow(12);
     const DEFAULT_N_TOPOLOGY_SHIFTS_BEFORE_RESHUFFLE: u64 = 1;
     const DEFAULT_MAILBOX_SIZE: usize = 100;

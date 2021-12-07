@@ -1,4 +1,4 @@
-//! This module provides `WorldStateView` - in-memory representations of the current blockchain
+//! This module provides the [`WorldStateView`] - in-memory representations of the current blockchain
 //! state.
 
 use std::{
@@ -14,69 +14,43 @@ use dashmap::{
 };
 use eyre::Result;
 use iroha_crypto::HashOf;
-use iroha_data_model::{domain::DomainsMap, peer::PeersIds, prelude::*};
+use iroha_data_model::{domain::DomainsMap, peer::PeersIds, prelude::*, Metrics};
+use iroha_logger::prelude::*;
 use tokio::task;
 
 use crate::{
     block::Chain,
     prelude::*,
-    smartcontracts::{FindError, ParentHashNotFound},
+    smartcontracts::{Execute, FindError},
 };
-
-/// World proxy for using with `WorldTrait`
-#[derive(Debug, Default, Clone)]
-pub struct World(iroha_data_model::world::World);
-
-impl Deref for World {
-    type Target = iroha_data_model::world::World;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for World {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl WorldTrait for World {
-    /// Creates `World` with these `domains` and `trusted_peers_ids`
-    fn with(
-        domains: impl IntoIterator<Item = (Name, Domain)>,
-        trusted_peers_ids: impl IntoIterator<Item = PeerId>,
-    ) -> Self {
-        Self(iroha_data_model::world::World::with(
-            domains,
-            trusted_peers_ids,
-        ))
-    }
-}
-
-impl World {
-    /// Creates an empty `World`.
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
 
 /// World trait for mocking
 pub trait WorldTrait:
-    Deref<Target = iroha_data_model::world::World>
-    + DerefMut
-    + Send
-    + Sync
-    + 'static
-    + Debug
-    + Default
-    + Sized
-    + Clone
+    Deref<Target = World> + DerefMut + Send + Sync + 'static + Debug + Default + Sized + Clone
 {
-    /// Creates `World` with these `domains` and `trusted_peers_ids`
+    /// Creates a [`World`] with these [`Domain`]s and trusted [`PeerId`]s.
     fn with(
         domains: impl IntoIterator<Item = (Name, Domain)>,
         trusted_peers_ids: impl IntoIterator<Item = PeerId>,
     ) -> Self;
+}
+
+/// The global entity consisting of `domains`, `triggers` and etc.
+/// For example registration of domain, will have this as an ISI target.
+#[derive(Debug, Default, Clone)]
+pub struct World {
+    /// Registered domains.
+    pub domains: DomainsMap,
+    /// Identifications of discovered trusted peers.
+    pub trusted_peers_ids: PeersIds,
+    /// Iroha `Triggers` registered on the peer.
+    pub triggers: Vec<Instruction>,
+    /// Iroha parameters.
+    pub parameters: Vec<Parameter>,
+    /// Roles.
+    /// [`Role`] pairs.
+    #[cfg(feature = "roles")]
+    pub roles: iroha_data_model::role::RolesMap,
 }
 
 /// Current state of the blockchain alligned with `Iroha` module.
@@ -90,11 +64,37 @@ pub struct WorldStateView<W: WorldTrait> {
     blocks: Arc<Chain>,
     /// Hashes of transactions
     pub transactions: DashSet<HashOf<VersionedTransaction>>,
+    /// Metrics for prometheus endpoint.
+    pub metrics: Arc<Metrics>,
 }
 
 impl<W: WorldTrait + Default> Default for WorldStateView<W> {
+    #[inline]
     fn default() -> Self {
         Self::new(W::default())
+    }
+}
+
+impl World {
+    /// Creates an empty `World`.
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl WorldTrait for World {
+    fn with(
+        domains: impl IntoIterator<Item = (Name, Domain)>,
+        trusted_peers_ids: impl IntoIterator<Item = PeerId>,
+    ) -> Self {
+        let domains = domains.into_iter().collect();
+        let trusted_peers_ids = trusted_peers_ids.into_iter().collect();
+        World {
+            domains,
+            trusted_peers_ids,
+            ..World::new()
+        }
     }
 }
 
@@ -107,16 +107,15 @@ impl<W: WorldTrait> WorldStateView<W> {
             config: Configuration::default(),
             transactions: DashSet::new(),
             blocks: Arc::new(Chain::new()),
+            metrics: Arc::new(Metrics::default()),
         }
     }
 
-    /// [`WorldStateView`] constructor with configuration.
+    /// [`WorldStateView`] constructor.
     pub fn from_config(config: Configuration, world: W) -> Self {
         WorldStateView {
-            world,
-            blocks: Arc::new(Chain::new()),
-            transactions: DashSet::new(),
             config,
+            ..WorldStateView::new(world)
         }
     }
 
@@ -124,27 +123,61 @@ impl<W: WorldTrait> WorldStateView<W> {
     #[iroha_futures::telemetry_future]
     pub async fn init(&self, blocks: Vec<VersionedCommittedBlock>) {
         for block in blocks {
-            self.apply(block).await
+            #[allow(clippy::panic)]
+            if let Err(error) = self.apply(block).await {
+                error!(%error, "Initialization of WSV failed");
+                panic!("WSV initialization failed");
+            }
         }
     }
 
-    /// Apply `CommittedBlock` with changes in form of **Iroha Special Instructions** to `self`.
-    #[iroha_futures::telemetry_future]
-    #[iroha_logger::log(skip(self, block))]
-    pub async fn apply(&self, block: VersionedCommittedBlock) {
-        for tx in &block.as_inner_v1().transactions {
-            if let Err(error) = tx.proceed(self) {
-                iroha_logger::warn!(%error, "Failed to proceed transaction on WSV");
+    /// Returns a set of permission tokens granted to this account as part of roles and separately.
+    #[allow(clippy::unused_self)]
+    pub fn account_permission_tokens(
+        &self,
+        account: &Account,
+    ) -> iroha_data_model::account::Permissions {
+        #[allow(unused_mut)]
+        let mut tokens = account.permission_tokens.clone();
+        #[cfg(feature = "roles")]
+        for role_id in &account.roles {
+            if let Some(role) = self.world.roles.get(role_id) {
+                let mut role_tokens = role.permissions.clone();
+                tokens.append(&mut role_tokens);
             }
+        }
+        tokens
+    }
+
+    /// Apply `CommittedBlock` with changes in form of **Iroha Special Instructions** to `self`.
+    ///
+    /// # Errors
+    /// Can fail if execution of instruction fails(should be fine after validation)
+
+    /// Apply [`CommittedBlock`] with changes in form of **Iroha Special Instructions** to `self`.
+    #[iroha_futures::telemetry_future]
+    #[log(skip(self, block))]
+    pub async fn apply(&self, block: VersionedCommittedBlock) -> Result<()> {
+        for tx in &block.as_v1().transactions {
+            let account_id = &tx.payload().account_id;
+            tx.as_v1()
+                .payload
+                .instructions
+                .iter()
+                .cloned()
+                .try_for_each(|instruction| instruction.execute(account_id.clone(), self))?;
+
             self.transactions.insert(tx.hash());
             // Yeild control cooperatively to the task scheduler.
             // The transaction processing is a long CPU intensive task, so this should be included here.
             task::yield_now().await;
         }
-        for tx in &block.as_inner_v1().rejected_transactions {
+        for tx in &block.as_v1().rejected_transactions {
             self.transactions.insert(tx.hash());
         }
+        self.tx_metric_update();
         self.blocks.push(block);
+        Ok(())
     }
 
     /// Hash of latest block
@@ -157,36 +190,58 @@ impl<W: WorldTrait> WorldStateView<W> {
     }
 
     /// Height of blockchain
+    #[inline]
     pub fn height(&self) -> u64 {
+        self.metrics.block_height.get()
+    }
+
+    #[cfg(test)]
+    pub fn transactions_number(&self) -> u64 {
+        self.blocks.iter().fold(0_u64, |acc, block| {
+            acc + block.as_v1().transactions.len() as u64
+                + block.as_v1().rejected_transactions.len() as u64
+        })
+    }
+
+    /// Returns [`Some`] milliseconds since the genesis block was
+    /// committed, or [`None`] if it wasn't.
+    pub fn genesis_timestamp(&self) -> Option<u128> {
         self.blocks
-            .latest_block()
-            .map_or(0, |block_entry| block_entry.value().header().height)
+            .iter()
+            .next()
+            .map(|val| val.as_v1().header.timestamp)
+    }
+
+    /// Update metrics; run when block commits.
+    fn tx_metric_update(&self) {
+        let last_block_txs_total = self
+            .blocks
+            .iter()
+            .last()
+            .map(|block| {
+                block.as_v1().transactions.len() as u64
+                    + block.as_v1().rejected_transactions.len() as u64
+            })
+            .unwrap_or_default();
+        self.metrics.txs.inc_by(last_block_txs_total);
+        self.metrics.block_height.inc();
     }
 
     /// Returns blocks after hash
-    ///
-    /// # Errors
-    /// Block with `hash` was not found.
     pub fn blocks_after(
         &self,
         hash: HashOf<VersionedCommittedBlock>,
         max_blocks: u32,
-    ) -> Result<Vec<VersionedCommittedBlock>> {
-        let from_pos = self
-            .blocks
+    ) -> Vec<VersionedCommittedBlock> {
+        self.blocks
             .iter()
-            .position(|block_entry| block_entry.value().header().previous_block_hash == hash)
-            .ok_or(FindError::Block(ParentHashNotFound(hash)))?;
-        Ok(self
-            .blocks
-            .iter()
-            .skip(from_pos)
+            .skip_while(|block_entry| block_entry.value().header().previous_block_hash != hash)
             .take(max_blocks as usize)
             .map(|block_entry| block_entry.value().clone())
-            .collect())
+            .collect()
     }
 
-    /// Get `World` without an ability to modify it.
+    /// Get an immutable view of the `World`.
     pub fn world(&self) -> &W {
         &self.world
     }
@@ -233,6 +288,7 @@ impl<W: WorldTrait> WorldStateView<W> {
     }
 
     /// Get `Domain` and pass it to closure.
+    ///
     /// # Errors
     /// Fails if there is no domain
     pub fn map_domain<T>(
@@ -245,6 +301,7 @@ impl<W: WorldTrait> WorldStateView<W> {
     }
 
     /// Get `Domain` and pass it to closure to modify it
+    ///
     /// # Errors
     /// Fails if there is no domain
     pub fn modify_domain(
@@ -257,6 +314,7 @@ impl<W: WorldTrait> WorldStateView<W> {
     }
 
     /// Get `Account` and pass it to closure.
+    ///
     /// # Errors
     /// Fails if there is no domain or account
     pub fn map_account<T>(
@@ -273,6 +331,7 @@ impl<W: WorldTrait> WorldStateView<W> {
     }
 
     /// Get `Account` and pass it to closure to modify it
+    ///
     /// # Errors
     /// Fails if there is no domain or account
     pub fn modify_account(
@@ -332,11 +391,11 @@ impl<W: WorldTrait> WorldStateView<W> {
         f: impl FnOnce(&mut Asset) -> Result<()>,
     ) -> Result<()> {
         self.modify_account(&id.account_id, |account| {
-            let mut asset = account
+            let asset = account
                 .assets
                 .get_mut(id)
                 .ok_or_else(|| FindError::Asset(id.clone()))?;
-            f(&mut asset)?;
+            f(asset)?;
             if asset.value.is_zero_value() {
                 account.assets.remove(id);
             }
@@ -406,25 +465,25 @@ impl<W: WorldTrait> WorldStateView<W> {
         f(asset_definition_entry)
     }
 
-    /// Checks if this `tx` is already committed or rejected.
+    /// Check if this [`VersionedTransaction`] is already committed or rejected.
     pub fn has_transaction(&self, hash: &HashOf<VersionedTransaction>) -> bool {
         self.transactions.contains(hash)
     }
 
-    /// Find a transaction by provided hash
+    /// Find a [`VersionedTransaction`] by hash.
     pub fn transaction_value_by_hash(
         &self,
         hash: &HashOf<VersionedTransaction>,
     ) -> Option<TransactionValue> {
         self.blocks.iter().find_map(|b| {
-            b.as_inner_v1()
+            b.as_v1()
                 .rejected_transactions
                 .iter()
                 .find(|e| e.hash() == *hash)
                 .cloned()
                 .map(TransactionValue::RejectedTransaction)
                 .or_else(|| {
-                    b.as_inner_v1()
+                    b.as_v1()
                         .transactions
                         .iter()
                         .find(|e| e.hash() == *hash)
@@ -444,7 +503,7 @@ impl<W: WorldTrait> WorldStateView<W> {
             .blocks
             .iter()
             .flat_map(|block_entry| {
-                let block = block_entry.value().as_inner_v1();
+                let block = block_entry.value().as_v1();
                 block
                     .rejected_transactions
                     .iter()
@@ -465,6 +524,21 @@ impl<W: WorldTrait> WorldStateView<W> {
             .collect::<Vec<_>>();
         transactions.sort();
         transactions
+    }
+}
+
+impl Deref for World {
+    type Target = Self;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self
+    }
+}
+
+impl DerefMut for World {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self
     }
 }
 
@@ -491,7 +565,7 @@ pub mod config {
         pub account_metadata_limits: MetadataLimits,
         /// [`MetadataLimits`] of any domain's metadata.
         pub domain_metadata_limits: MetadataLimits,
-        /// [`LengthLimits`]for the number of chars in identifiers that can be stored in the WSV.
+        /// [`LengthLimits`] for the number of chars in identifiers that can be stored in the WSV.
         pub ident_length_limits: LengthLimits,
     }
 
@@ -505,5 +579,44 @@ pub mod config {
                 ident_length_limits: DEFAULT_IDENT_LENGTH_LIMITS,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::restriction)]
+
+    use super::*;
+
+    #[tokio::test]
+    async fn get_blocks_after_hash() {
+        const BLOCK_CNT: usize = 10;
+        const BATCH_SIZE: u32 = 3;
+
+        let mut block = ValidBlock::new_dummy().commit();
+        let wsv = WorldStateView::<World>::default();
+
+        let mut block_hashes = vec![];
+        for i in 1..=BLOCK_CNT {
+            block.header.height = i as u64;
+            if let Some(block_hash) = block_hashes.last() {
+                block.header.previous_block_hash = *block_hash;
+            }
+            let block: VersionedCommittedBlock = block.clone().into();
+            block_hashes.push(block.hash());
+            wsv.apply(block).await.unwrap();
+        }
+
+        assert_eq!(
+            wsv.blocks_after(block_hashes[2], BATCH_SIZE)
+                .iter()
+                .map(VersionedCommittedBlock::hash)
+                .collect::<Vec<_>>(),
+            block_hashes
+                .into_iter()
+                .skip(3)
+                .take(BATCH_SIZE as usize)
+                .collect::<Vec<_>>(),
+        );
     }
 }

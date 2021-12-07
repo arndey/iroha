@@ -7,9 +7,9 @@ pub mod event;
 pub mod genesis;
 mod init;
 pub mod kura;
-mod merkle;
 pub mod modules;
 pub mod queue;
+pub mod samples;
 pub mod smartcontracts;
 pub mod sumeragi;
 pub mod torii;
@@ -26,10 +26,8 @@ use iroha_logger::{FutureTelemetry, SubstrateTelemetry};
 use parity_scale_codec::{Decode, Encode};
 use smartcontracts::permissions::{IsInstructionAllowedBoxed, IsQueryAllowedBoxed};
 use tokio::{sync::broadcast, task::JoinHandle};
-use wsv::{World, WorldTrait};
 
 use crate::{
-    block::VersionedValidBlock,
     block_sync::{
         message::VersionedMessage as BlockSyncMessage, BlockSynchronizer, BlockSynchronizerTrait,
     },
@@ -40,6 +38,7 @@ use crate::{
     queue::Queue,
     sumeragi::{message::VersionedMessage as SumeragiMessage, Sumeragi, SumeragiTrait},
     torii::Torii,
+    wsv::WorldTrait,
 };
 
 /// The interval at which sumeragi checks if there are tx in the `queue`.
@@ -147,7 +146,7 @@ where
     ) -> Result<Self> {
         let genesis = G::from_configuration(
             args.submit_genesis,
-            &args.genesis_path,
+            crate::genesis::RawGenesisBlock::from_path(&args.genesis_path)?,
             &config.genesis,
             config.torii.max_instruction_number,
         )
@@ -182,7 +181,7 @@ where
         iroha_logger::info!("Hyperledgerいろは2にようこそ！");
 
         let listen_addr = config.torii.p2p_addr.clone();
-        iroha_logger::info!("Starting peer on {}", &listen_addr);
+        iroha_logger::info!(%listen_addr, "Starting peer");
         #[allow(clippy::expect_used)]
         let network = IrohaNetwork::new(
             broker.clone(),
@@ -232,7 +231,6 @@ where
             Arc::clone(&wsv),
             sumeragi.clone(),
             PeerId::new(&config.torii.p2p_addr, &config.public_key),
-            config.sumeragi.n_topology_shifts_before_reshuffle,
             broker.clone(),
         )
         .start()
@@ -245,6 +243,7 @@ where
             Arc::clone(&queue),
             query_validator,
             events_sender,
+            network_addr.clone(),
         );
         let torii = Some(torii);
         Ok(Self {
@@ -264,7 +263,7 @@ where
     /// Can fail if initing kura fails
     #[iroha_futures::telemetry_future]
     pub async fn start(&mut self) -> Result<()> {
-        iroha_logger::info!("Starting Iroha.");
+        iroha_logger::info!("Starting Iroha");
         self.torii
             .take()
             .ok_or_else(|| eyre!("Seems like peer was already started"))?
@@ -277,7 +276,7 @@ where
     /// # Errors
     /// Can fail if initing kura fails
     pub fn start_as_task(&mut self) -> Result<JoinHandle<eyre::Result<()>>> {
-        iroha_logger::info!("Starting Iroha as task.");
+        iroha_logger::info!("Starting Iroha as task");
         let torii = self
             .torii
             .take()
@@ -292,14 +291,14 @@ where
         telemetry: Option<(SubstrateTelemetry, FutureTelemetry)>,
         config: &Configuration,
     ) -> Result<bool> {
-        if let Some((telemetry, telemetry_future)) = telemetry {
+        if let Some((substrate_telemetry, telemetry_future)) = telemetry {
             #[cfg(feature = "dev-telemetry")]
             {
                 iroha_telemetry::dev::start(&config.telemetry, telemetry_future)
                     .await
                     .wrap_err("Failed to setup telemetry for futures")?;
             }
-            iroha_telemetry::ws::start(&config.telemetry, telemetry)
+            iroha_telemetry::ws::start(&config.telemetry, substrate_telemetry)
                 .await
                 .wrap_err("Failed to setup telemetry")
         } else {
@@ -368,12 +367,12 @@ pub mod prelude {
             CommittedBlock, PendingBlock, ValidBlock, VersionedCommittedBlock, VersionedValidBlock,
         },
         smartcontracts::permissions::AllowAll,
-        smartcontracts::Query,
+        smartcontracts::ValidQuery,
         tx::{
             AcceptedTransaction, ValidTransaction, VersionedAcceptedTransaction,
             VersionedValidTransaction,
         },
-        wsv::WorldStateView,
+        wsv::{World, WorldStateView},
         IsInBlockchain,
     };
 }

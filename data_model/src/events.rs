@@ -1,7 +1,7 @@
 //! Events for streaming API.
 #![allow(clippy::unused_self)]
 
-use iroha_derive::FromVariant;
+use iroha_macro::FromVariant;
 use iroha_schema::prelude::*;
 use iroha_version::prelude::*;
 use parity_scale_codec::{Decode, Encode};
@@ -10,35 +10,31 @@ use serde::{Deserialize, Serialize};
 declare_versioned_with_scale!(VersionedEventSocketMessage 1..2, Debug, Clone, FromVariant, IntoSchema);
 
 impl VersionedEventSocketMessage {
-    /// The same as [`as_v1`](`VersionedEventSocketMessage::as_v1()`) but also runs into on it
-    pub const fn as_inner_v1(&self) -> &EventSocketMessage {
+    /// Converts from `&VersionedEventSocketMessage` to V1 reference
+    pub const fn as_v1(&self) -> &EventSocketMessage {
         match self {
-            Self::V1(v1) => &v1.0,
+            Self::V1(v1) => v1,
         }
     }
 
-    /// The same as [`as_v1`](`VersionedEventSocketMessage::as_v1()`) but also runs into on it
-    pub fn as_mut_inner_v1(&mut self) -> &mut EventSocketMessage {
+    /// Converts from `&mut VersionedEventSocketMessage` to V1 mutable reference
+    pub fn as_mut_v1(&mut self) -> &mut EventSocketMessage {
         match self {
-            Self::V1(v1) => &mut v1.0,
+            Self::V1(v1) => v1,
         }
     }
 
-    /// The same as [`as_v1`](`VersionedEventSocketMessage::as_v1()`) but also runs into on it
-    pub fn into_inner_v1(self) -> EventSocketMessage {
+    /// Performs the conversion from `VersionedEventSocketMessage` to V1
+    pub fn into_v1(self) -> EventSocketMessage {
         match self {
-            Self::V1(v1) => v1.into(),
+            Self::V1(v1) => v1,
         }
     }
 }
 
 /// Message type used for communication over web socket event stream.
 #[allow(variant_size_differences)]
-#[version_with_scale(
-    n = 1,
-    versioned = "VersionedEventSocketMessage",
-    derive = "Debug, Clone, IntoSchema, Deserialize, Serialize"
-)]
+#[version_with_scale(n = 1, versioned = "VersionedEventSocketMessage")]
 #[derive(Debug, Clone, IntoSchema, FromVariant, Decode, Encode, Deserialize, Serialize)]
 pub enum EventSocketMessage {
     /// Request sent by client to subscribe to events.
@@ -91,7 +87,7 @@ impl EventFilter {
 
 /// Events of data entities.
 pub mod data {
-    use iroha_derive::FromVariant;
+    use iroha_macro::FromVariant;
     use iroha_schema::prelude::*;
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Serialize};
@@ -189,7 +185,7 @@ pub mod pipeline {
     };
 
     use iroha_crypto::{Hash, SignatureVerificationFail};
-    use iroha_derive::FromVariant;
+    use iroha_macro::FromVariant;
     use iroha_schema::prelude::*;
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Serialize};
@@ -366,20 +362,20 @@ pub mod pipeline {
         IntoSchema,
     )]
     pub enum TransactionRejectionReason {
-        /// Failed due to low authority.
-        #[error("Transaction rejected due to low authority")]
+        /// Insufficient authorisation.
+        #[error("Transaction rejected due to insufficient authorisation")]
         NotPermitted(#[source] NotPermittedFail),
-        /// Failed verify signature condition specified in the account.
-        #[error("Transaction rejected due to unsatisfied signature condition")]
+        /// Failed to verify signature condition specified in the account.
+        #[error("Transaction rejected due to an unsatisfied signature condition")]
         UnsatisfiedSignatureCondition(#[source] UnsatisfiedSignatureConditionFail),
         /// Failed to execute instruction.
-        #[error("Transaction rejected due to instruction execution")]
+        #[error("Transaction rejected due to failure in instruction execution")]
         InstructionExecution(#[source] InstructionExecutionFail),
         /// Failed to verify signatures.
-        #[error("Transaction rejected due to signature verification")]
+        #[error("Transaction rejected due to failed signature verification")]
         SignatureVerification(#[source] SignatureVerificationFail<Payload>),
         /// Genesis account can sign only transactions in the genesis block.
-        #[error("Genesis account can sign only transactions in the genesis block.")]
+        #[error("The genesis account can only sign transactions in the genesis block.")]
         UnexpectedGenesisAccountSignature,
     }
 

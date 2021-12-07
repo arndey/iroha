@@ -2,7 +2,7 @@
 mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
-    use std::{collections::BTreeMap, convert::TryFrom};
+    use std::collections::BTreeMap;
 
     use iroha_derive::Io;
     use parity_scale_codec::{Decode, Encode};
@@ -17,7 +17,7 @@ mod tests {
 
     impl SampleContract {
         fn new() -> Self {
-            SampleContract {
+            Self {
                 boolean_field: true,
                 string_field: "String".to_owned(),
                 vec_field: vec!["String_In_Vec".to_owned()],

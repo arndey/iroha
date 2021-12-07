@@ -17,7 +17,8 @@ use std::{
 use eyre::{eyre, Result};
 use iroha_crypto::HashOf;
 use iroha_data_model::{expression::prelude::*, isi::*, prelude::*};
-use iroha_derive::FromVariant;
+use iroha_logger::prelude::*;
+use iroha_macro::FromVariant;
 use thiserror::Error;
 
 use super::{Evaluate, Execute};
@@ -164,7 +165,7 @@ impl<W: WorldTrait> Execute<W> for Instruction {
 impl<W: WorldTrait> Execute<W> for RegisterBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -190,7 +191,7 @@ impl<W: WorldTrait> Execute<W> for RegisterBox {
 impl<W: WorldTrait> Execute<W> for UnregisterBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -207,6 +208,7 @@ impl<W: WorldTrait> Execute<W> for UnregisterBox {
             IdBox::DomainName(domain_name) => {
                 Unregister::<Domain>::new(domain_name).execute(authority, wsv)
             }
+            IdBox::PeerId(peer_id) => Unregister::<Peer>::new(peer_id).execute(authority, wsv),
             _ => Err(eyre!("Unsupported unregister instruction.").into()),
         }
     }
@@ -215,7 +217,7 @@ impl<W: WorldTrait> Execute<W> for UnregisterBox {
 impl<W: WorldTrait> Execute<W> for MintBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -228,6 +230,9 @@ impl<W: WorldTrait> Execute<W> for MintBox {
         ) {
             (IdBox::AssetId(asset_id), Value::U32(quantity)) => {
                 Mint::<Asset, u32>::new(quantity, asset_id).execute(authority, wsv)
+            }
+            (IdBox::AssetId(asset_id), Value::U128(quantity)) => {
+                Mint::<Asset, u128>::new(quantity, asset_id).execute(authority, wsv)
             }
             (IdBox::AssetId(asset_id), Value::Fixed(quantity)) => {
                 Mint::<Asset, Fixed>::new(quantity, asset_id).execute(authority, wsv)
@@ -247,7 +252,7 @@ impl<W: WorldTrait> Execute<W> for MintBox {
 impl<W: WorldTrait> Execute<W> for BurnBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -275,7 +280,7 @@ impl<W: WorldTrait> Execute<W> for BurnBox {
 impl<W: WorldTrait> Execute<W> for TransferBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -305,7 +310,7 @@ impl<W: WorldTrait> Execute<W> for TransferBox {
 impl<W: WorldTrait> Execute<W> for SetKeyValueBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -338,7 +343,7 @@ impl<W: WorldTrait> Execute<W> for SetKeyValueBox {
 impl<W: WorldTrait> Execute<W> for RemoveKeyValueBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -365,7 +370,7 @@ impl<W: WorldTrait> Execute<W> for RemoveKeyValueBox {
 impl<W: WorldTrait> Execute<W> for If {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -384,7 +389,7 @@ impl<W: WorldTrait> Execute<W> for If {
 impl<W: WorldTrait> Execute<W> for Pair {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -399,7 +404,7 @@ impl<W: WorldTrait> Execute<W> for Pair {
 impl<W: WorldTrait> Execute<W> for SequenceBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,
@@ -415,7 +420,7 @@ impl<W: WorldTrait> Execute<W> for SequenceBox {
 impl<W: WorldTrait> Execute<W> for FailBox {
     type Error = Error;
 
-    #[iroha_logger::log(skip(_authority, _wsv))]
+    #[log(skip(_authority, _wsv))]
     fn execute(
         self,
         _authority: <Account as Identifiable>::Id,
@@ -428,7 +433,7 @@ impl<W: WorldTrait> Execute<W> for FailBox {
 impl<W: WorldTrait> Execute<W> for GrantBox {
     type Error = Error;
 
-    #[iroha_logger::log]
+    #[log]
     fn execute(
         self,
         authority: <Account as Identifiable>::Id,

@@ -12,7 +12,7 @@ use crate::prelude::*;
 /// - transfer, etc.
 pub mod isi {
     use eyre::eyre;
-    use iroha_logger::log;
+    use iroha_logger::prelude::*;
 
     use super::*;
 
@@ -112,9 +112,7 @@ pub mod isi {
             wsv.asset_or_insert(&self.destination_id, Fixed::ZERO)?;
             wsv.modify_asset(&self.destination_id, |asset| {
                 let quantity: &mut Fixed = asset.try_as_mut()?;
-                *quantity = quantity
-                    .checked_add(self.object)
-                    .ok_or(MathError::OverflowError)?;
+                *quantity = quantity.checked_add(self.object)?;
                 Ok(())
             })
             .map_err(Into::into)
@@ -208,9 +206,7 @@ pub mod isi {
             )?;
             wsv.modify_asset(&self.destination_id, |asset| {
                 let quantity: &mut Fixed = asset.try_as_mut()?;
-                *quantity = quantity
-                    .checked_sub(self.object)
-                    .ok_or(MathError::NotEnoughQuantity)?;
+                *quantity = quantity.checked_sub(self.object)?;
                 Ok(())
             })
             .map_err(Into::into)
@@ -278,11 +274,11 @@ pub mod isi {
 /// Query module provides [`Query`] Asset related implementations.
 pub mod query {
     use eyre::{eyre, Result, WrapErr};
-    use iroha_logger::log;
+    use iroha_logger::prelude::*;
 
     use super::*;
 
-    impl<W: WorldTrait> Query<W> for FindAllAssets {
+    impl<W: WorldTrait> ValidQuery<W> for FindAllAssets {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let mut vec = Vec::new();
@@ -297,7 +293,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAllAssetsDefinitions {
+    impl<W: WorldTrait> ValidQuery<W> for FindAllAssetsDefinitions {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let mut vec = Vec::new();
@@ -310,7 +306,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetById {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetById {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let id = self
@@ -326,7 +322,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetsByName {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetsByName {
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let name = self
                 .name
@@ -346,7 +342,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetsByAccountId {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetsByAccountId {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let id = self
@@ -357,7 +353,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetsByAssetDefinitionId {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetsByAssetDefinitionId {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let id = self
@@ -378,7 +374,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetsByDomainName {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetsByDomainName {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let name = self
@@ -395,7 +391,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetsByDomainNameAndAssetDefinitionId {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetsByDomainNameAndAssetDefinitionId {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let name = self
@@ -425,7 +421,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetQuantityById {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetQuantityById {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<u32> {
             let id = self
@@ -445,7 +441,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetKeyValueByIdAndKey {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetKeyValueByIdAndKey {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Value> {
             let id = self

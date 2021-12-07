@@ -1,12 +1,12 @@
 //! This module contains query related Iroha functionality.
 
-use std::{convert::TryFrom, error::Error as StdError, fmt};
+use std::{error::Error as StdError, fmt};
 
 use eyre::{eyre, Result};
 use iroha_crypto::SignatureOf;
 use iroha_data_model::{prelude::*, query};
-use iroha_derive::Io;
-use iroha_version::{scale::DecodeVersioned, Version};
+use iroha_macro::Io;
+use iroha_version::scale::DecodeVersioned;
 use parity_scale_codec::{Decode, Encode};
 use thiserror::Error;
 use warp::{
@@ -160,16 +160,12 @@ impl TryFrom<&Bytes> for VerifiedQueryRequest {
     fn try_from(body: &Bytes) -> Result<Self, Self::Error> {
         let query = VersionedSignedQueryRequest::decode_versioned(body.as_ref())
             .map_err(|e| Error::Decode(Box::new(e)))?;
-        let version = query.version();
-        let query: SignedQueryRequest = query
-            .into_v1()
-            .ok_or(Error::Version(UnsupportedVersionError { version }))?
-            .into();
+        let VersionedSignedQueryRequest::V1(query) = query;
         VerifiedQueryRequest::try_from(query)
     }
 }
 
-impl<W: WorldTrait> Query<W> for QueryBox {
+impl<W: WorldTrait> ValidQuery<W> for QueryBox {
     fn execute(&self, wsv: &WorldStateView<W>) -> Result<Value> {
         use QueryBox::*;
 
@@ -297,7 +293,7 @@ mod tests {
             .sign(ALICE_KEYS.clone())
             .expect("Failed to sign blocks.")
             .commit();
-        wsv.apply(vcb).await;
+        wsv.apply(vcb).await?;
 
         let wrong_hash = Hash::new(&[2_u8]);
         let not_found = FindTransactionByHash::new(wrong_hash).execute(&wsv);

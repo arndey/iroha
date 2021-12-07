@@ -9,12 +9,12 @@ env:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, Linux]
-    # container: rust:1.56-buster
+    runs-on: ubuntu-latest
     container:
       image: 7272721/i2-ci:latest
     steps:
       - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
       - name: set up buildx
         uses: docker/setup-buildx-action@v1
         id: buildx
@@ -58,12 +58,32 @@ jobs:
             PROFILE=--release
             BIN=iroha_crypto_cli
 
-
-  archive-and-publish-schema:
-    runs-on: [self-hosted, Linux]
-    container: rust:1.56-buster
+  build-ci-image:
+    runs-on: ubuntu-latest
+    container:
+      image: 7272721/i2-ci:latest
     steps:
       - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build & push Docker container
+        uses: docker/build-push-action@v2
+        with:
+          file: Dockerfile.ci
+          tags: hyperledger/ci-iroha2:latest
+          push: true
+
+  archive-and-publish-schema:
+    runs-on: ubuntu-latest
+    container:
+      image: 7272721/i2-ci:latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
       - name: Install dependencies
         run: |
           apt-get update
@@ -100,19 +120,12 @@ jobs:
           path: target/schema
 
   print-telemetry:
-    runs-on: [self-hosted, Linux] #ubuntu-latest
-    container: rust:1.56-buster
+    runs-on: ubuntu-latest
+    container:
+      image: 7272721/i2-ci:latest
     steps:
       - uses: actions/checkout@v2
-      - uses: actions/cache@v2
-        with:
-          path: |
-              ${{ env.CARGO_HOME }}
-              target/
-          key: iroha2-rust-telemetry-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-              iroha2-rust-telemetry-
-
+      - uses: Swatinem/rust-cache@v1
       - name: Run debug tests and save telemetry
         env:
           TELEMETRY_FILE: ../target/telemetry/debug.json.lz4
@@ -156,28 +169,16 @@ jobs:
           name: telemetry
           path: target/telemetry
 
-
-
-
-
   # Coverage is both in PR and in push pipelines so that:
   # 1. PR can get coverage report from bot.
   # 2  Coverage bot can have results from `iroha2-dev` to report coverage changes.
   coverage:
-    runs-on: [self-hosted, Linux]
-    #container: rust:1.56-buster
+    runs-on: ubuntu-latest
     container:
       image: 7272721/i2-ci:latest
     steps:
       - uses: actions/checkout@v2
-      - uses: actions/cache@v2
-        with:
-          path: |
-              ${{ env.CARGO_HOME }}
-              target/
-          key: iroha2-rust-test-coverage-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-              iroha2-rust-test-coverage
+      - uses: Swatinem/rust-cache@v1
       - name: Run tests
         run: mold -run cargo test --workspace --no-fail-fast -- --skip  unstable_network || true
         env:

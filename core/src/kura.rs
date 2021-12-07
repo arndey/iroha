@@ -15,6 +15,8 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
 use iroha_actor::{broker::*, prelude::*};
 use iroha_crypto::HashOf;
+use iroha_data_model::merkle::MerkleTree;
+use iroha_logger::prelude::*;
 use iroha_version::scale::{DecodeVersioned, EncodeVersioned};
 use pin_project::pin_project;
 use serde::{Deserialize, Serialize};
@@ -27,7 +29,6 @@ use tokio_stream::wrappers::ReadDirStream;
 use crate::{
     block::VersionedCommittedBlock,
     block_sync::ContinueSync,
-    merkle::MerkleTree,
     prelude::*,
     sumeragi::{self, UpdateNetworkTopology},
     wsv::WorldTrait,
@@ -49,13 +50,14 @@ pub struct GetBlockHash {
 /// Provides all necessary methods to read and write data, hides implementation details.
 #[derive(Debug)]
 pub struct KuraWithIO<W: WorldTrait, IO> {
+    // TODO: Kura doesn't have different initialisation modes!!!
+    #[allow(dead_code)]
     mode: Mode,
     block_store: BlockStore<IO>,
     merkle_tree: MerkleTree<VersionedCommittedBlock>,
     wsv: Arc<WorldStateView<W>>,
     broker: Broker,
     mailbox: usize,
-    io: IO,
 }
 
 /// Production qualification of `KuraWithIO`
@@ -82,7 +84,6 @@ impl<W: WorldTrait, IO: DiskIO> KuraWithIO<W, IO> {
             wsv,
             broker,
             mailbox,
-            io,
         })
     }
 }
@@ -180,8 +181,8 @@ impl<W: WorldTrait, IO: DiskIO> Actor for KuraWithIO<W, IO> {
                     .await;
             }
             Err(error) => {
-                iroha_logger::error!(%error, "Initialization of kura failed");
-                panic!("Init failed");
+                error!(%error, "Initialization of kura failed");
+                panic!("Kura initialization failed");
             }
         }
     }
@@ -209,7 +210,7 @@ impl<W: WorldTrait, IO: DiskIO> Handler<StoreBlock> for KuraWithIO<W, IO> {
             iroha_logger::telemetry!(msg = iroha_telemetry::msg::SYSTEM_CONNECTED, genesis_hash = %block.hash());
         }
         if let Err(error) = self.store(block).await {
-            iroha_logger::error!(%error, "Failed to write block")
+            error!(%error, "Failed to write block")
         }
     }
 }
@@ -237,18 +238,20 @@ impl<W: WorldTrait, IO: DiskIO> KuraWithIO<W, IO> {
 
     /// Methods consumes new validated block and atomically stores and caches it.
     #[iroha_futures::telemetry_future]
-    #[iroha_logger::log("INFO", skip(self, block))]
+    #[log("INFO", skip(self, block))]
     pub async fn store(
         &mut self,
         block: VersionedCommittedBlock,
     ) -> Result<HashOf<VersionedCommittedBlock>> {
         match self.block_store.write(&block).await {
-            Ok(hash) => {
-                self.merkle_tree = self.merkle_tree.add(hash);
-                self.wsv.apply(block).await;
+            Ok(block_hash) => {
+                self.merkle_tree = self.merkle_tree.add(block_hash);
+                if let Err(error) = self.wsv.apply(block).await {
+                    warn!(%error, %block_hash, "Failed to apply block on WSV");
+                }
                 self.broker.issue_send(UpdateNetworkTopology).await;
                 self.broker.issue_send(ContinueSync).await;
-                Ok(hash)
+                Ok(block_hash)
             }
             Err(error) => {
                 let blocks = self
@@ -309,6 +312,13 @@ pub enum Error {
         #[source]
         iroha_version::error::Error,
     ),
+    /// Allocation error
+    #[error("Failed to allocate buffer")]
+    Alloc(
+        #[from]
+        #[source]
+        std::collections::TryReserveError,
+    ),
     /// Zero-height block was provided
     #[error("An attempt to write zero-height block.")]
     ZeroBlock,
@@ -319,10 +329,6 @@ pub enum Error {
     #[error("Inconsequential block write.")]
     InconsequentialBlockWrite,
 }
-
-/// Maximum buffer for block deserialization (hardcoded 500Kb for now)
-/// TODO: make it configurable
-static BUFFER_SIZE_LIMIT: u64 = 512_000;
 
 impl<IO: DiskIO> BlockStore<IO> {
     /// Initialize block storage at `path`.
@@ -400,6 +406,7 @@ impl<IO: DiskIO> BlockStore<IO> {
     ///
     /// # Errors
     /// * Will fail if storage file contents is malformed (incorrect framing or encoding)
+    /// * Most likely, buffer size will be wrong and lead to `TryReserveError`
     ///
     #[allow(clippy::future_not_send)]
     async fn read_block<R: AsyncBufReadExt + Unpin>(
@@ -409,11 +416,11 @@ impl<IO: DiskIO> BlockStore<IO> {
             return Ok(None);
         }
         let len = file_stream.read_u64_le().await?;
-        if len > BUFFER_SIZE_LIMIT {
-            return Err(Error::IO(std::io::ErrorKind::OutOfMemory.into()));
-        }
+        let mut buffer = Vec::new();
         #[allow(clippy::cast_possible_truncation)]
-        let mut buffer: Vec<u8> = vec![0; len as usize];
+        buffer.try_reserve(len as usize)?;
+        #[allow(clippy::cast_possible_truncation)]
+        buffer.resize(len as usize, 0);
         let _len = file_stream.read_exact(&mut buffer).await?;
         Ok(Some(VersionedCommittedBlock::decode_versioned(&buffer)?))
     }
@@ -455,7 +462,7 @@ impl<IO: DiskIO> BlockStore<IO> {
             .map_ok(Self::read_file)
             .try_flatten()
             .enumerate()
-            .map(|(i, b)| b.map(|b| (i, b)))
+            .map(|(i, b)| b.map(|bb| (i, bb)))
             .and_then(|(i, b)| async move {
                 if b.header().height == (i as u64) + 1 {
                     Ok(b)
@@ -471,7 +478,6 @@ impl<IO: DiskIO> BlockStore<IO> {
 ///
 /// # Errors
 /// Will fail on filesystem access error
-///
 async fn storage_files_base_indices<IO: DiskIO>(
     path: &Path,
     io: &IO,
@@ -479,8 +485,8 @@ async fn storage_files_base_indices<IO: DiskIO>(
     let bases = io
         .read_dir(path.to_path_buf())
         .await?
-        .filter_map(|e| async {
-            e.ok()
+        .filter_map(|item| async {
+            item.ok()
                 .and_then(|e| e.to_string_lossy().parse::<NonZeroU64>().ok())
         })
         .collect::<BTreeSet<_>>()
@@ -557,7 +563,7 @@ pub mod config {
         )
     }
 
-    fn default_mailbox_size() -> usize {
+    const fn default_mailbox_size() -> usize {
         DEFAULT_MAILBOX_SIZE
     }
 }
@@ -855,8 +861,9 @@ mod tests {
 
     /// In case we've got gibberish instead of proper data in storage files,
     /// we'll get one of the two possible errors:
-    /// * FraimingError, if file structure is invalid (basically, unexpected EOF)
-    /// * CodecError, if data is impossible to parse back into VersionedComittedBlock
+    /// * IO error, if file structure is invalid (basically, unexpected EOF)
+    /// * Alloc error - allocation failure in try_reserve (buffer size is too large)
+    /// * Codec error, if data is impossible to parse back into VersionedComittedBlock
     /// Both indicating that file is malformed.
     #[tokio::test]
     async fn read_gibberish_failure() {
@@ -876,9 +883,10 @@ mod tests {
             .unwrap()
             .try_collect::<Vec<_>>()
             .await;
-        let framing_err = matches!(expected_read_fail, Err(Error::IO(_)));
+        let io_err = matches!(expected_read_fail, Err(Error::IO(_)));
         let decode_err = matches!(expected_read_fail, Err(Error::Codec(_)));
-        assert!(framing_err || decode_err);
+        let alloc_err = matches!(expected_read_fail, Err(Error::Alloc(_)));
+        assert!(io_err || decode_err || alloc_err);
     }
 
     /// A test, injecting errors into disk IO operations

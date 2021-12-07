@@ -204,11 +204,11 @@ pub mod isi {
 /// Query module provides [`Query`] Domain related implementations.
 pub mod query {
     use eyre::{Result, WrapErr};
-    use iroha_logger::log;
+    use iroha_logger::prelude::*;
 
     use super::*;
 
-    impl<W: WorldTrait> Query<W> for FindAllDomains {
+    impl<W: WorldTrait> ValidQuery<W> for FindAllDomains {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             Ok(wsv
@@ -219,7 +219,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindDomainByName {
+    impl<W: WorldTrait> ValidQuery<W> for FindDomainByName {
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let name = self
                 .name
@@ -229,7 +229,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindDomainKeyValueByIdAndKey {
+    impl<W: WorldTrait> ValidQuery<W> for FindDomainKeyValueByIdAndKey {
         #[log]
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let name = self
@@ -245,7 +245,7 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> Query<W> for FindAssetDefinitionKeyValueByIdAndKey {
+    impl<W: WorldTrait> ValidQuery<W> for FindAssetDefinitionKeyValueByIdAndKey {
         fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
             let id = self
                 .id

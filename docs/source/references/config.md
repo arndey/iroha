@@ -1,6 +1,10 @@
-# Iroha config description
+# Iroha Configuration reference
 
-Configuration of iroha is done via options in the following document. Here is defaults for whole config:
+In this document we provide a reference and detailed descriptions of Iroha's configuration options.
+
+## Default configuration
+
+The following is the default configuration used by Iroha.
 
 ```json
 {
@@ -22,8 +26,8 @@ Configuration of iroha is done via options in the following document. Here is de
     },
     "BLOCK_TIME_MS": 1000,
     "TRUSTED_PEERS": [],
-    "COMMIT_TIME_MS": 1000,
-    "TX_RECEIPT_TIME_MS": 200,
+    "COMMIT_TIME_MS": 2000,
+    "TX_RECEIPT_TIME_MS": 500,
     "N_TOPOLOGY_SHIFTS_BEFORE_RESHUFFLE": 1,
     "MAX_INSTRUCTION_NUMBER": 4096,
     "MAILBOX": 100
@@ -31,8 +35,9 @@ Configuration of iroha is done via options in the following document. Here is de
   "TORII": {
     "P2P_ADDR": "127.0.0.1:1337",
     "API_URL": "127.0.0.1:8080",
+    "STATUS_URL": "127.0.0.1:8180",
     "MAX_TRANSACTION_SIZE": 32768,
-    "MAX_SUMERAGI_MESSAGE_SIZE": 16384000,
+    "MAX_CONTENT_LEN": 16384000,
     "MAX_INSTRUCTION_NUMBER": 4096
   },
   "BLOCK_SYNC": {
@@ -47,7 +52,7 @@ Configuration of iroha is done via options in the following document. Here is de
     "FUTURE_THRESHOLD_MS": 1000
   },
   "LOGGER": {
-    "MAX_LOG_LEVEL": "DEBUG",
+    "MAX_LOG_LEVEL": "INFO",
     "TELEMETRY_CAPACITY": 1000,
     "COMPACT_MODE": false,
     "LOG_FILE_PATH": null
@@ -55,8 +60,9 @@ Configuration of iroha is done via options in the following document. Here is de
   "GENESIS": {
     "ACCOUNT_PUBLIC_KEY": null,
     "ACCOUNT_PRIVATE_KEY": null,
-    "WAIT_FOR_PEERS_RETRY_COUNT": 0,
-    "WAIT_FOR_PEERS_RETRY_PERIOD_MS": 0
+    "WAIT_FOR_PEERS_RETRY_COUNT": 100,
+    "WAIT_FOR_PEERS_RETRY_PERIOD_MS": 500,
+    "GENESIS_SUBMISSION_DELAY_MS": 1000
   },
   "WSV": {
     "ASSET_METADATA_LIMITS": {
@@ -83,6 +89,8 @@ Configuration of iroha is done via options in the following document. Here is de
   "TELEMETRY": {
     "NAME": null,
     "URL": null,
+    "MIN_PERIOD": 1,
+    "MAX_EXPONENT": 4,
     "FILE": null
   },
   "NETWORK": {
@@ -107,7 +115,7 @@ Has type `BlockSyncConfiguration`. Can be configured via environment variable `I
 
 ### `block_sync.batch_size`
 
-The number of blocks, which can be send in one message.
+The number of blocks, which can be sent in one message.
 
 Has type `u32`. Can be configured via environment variable `BLOCK_SYNC_BATCH_SIZE`
 
@@ -117,7 +125,7 @@ Has type `u32`. Can be configured via environment variable `BLOCK_SYNC_BATCH_SIZ
 
 ### `block_sync.gossip_period_ms`
 
-The time between peer sharing its latest block hash with other peers in milliseconds.
+The time between sending request for latest block.
 
 Has type `u64`. Can be configured via environment variable `BLOCK_SYNC_GOSSIP_PERIOD_MS`
 
@@ -145,8 +153,9 @@ Has type `GenesisConfiguration`. Can be configured via environment variable `IRO
 {
   "ACCOUNT_PRIVATE_KEY": null,
   "ACCOUNT_PUBLIC_KEY": null,
-  "WAIT_FOR_PEERS_RETRY_COUNT": 0,
-  "WAIT_FOR_PEERS_RETRY_PERIOD_MS": 0
+  "GENESIS_SUBMISSION_DELAY_MS": 1000,
+  "WAIT_FOR_PEERS_RETRY_COUNT": 100,
+  "WAIT_FOR_PEERS_RETRY_PERIOD_MS": 500
 }
 ```
 
@@ -162,12 +171,22 @@ null
 
 ### `genesis.account_public_key`
 
-Genesis account public key, should be supplied to all the peers.
+The genesis account public key, should be supplied to all peers.
 
 Has type `Option<PublicKey>`. Can be configured via environment variable `IROHA_GENESIS_ACCOUNT_PUBLIC_KEY`
 
 ```json
 null
+```
+
+### `genesis.genesis_submission_delay_ms`
+
+Delay before genesis block submission after minimum number of peers were discovered to be online.
+
+Has type `u64`. Can be configured via environment variable `IROHA_GENESIS_GENESIS_SUBMISSION_DELAY_MS`
+
+```json
+1000
 ```
 
 ### `genesis.wait_for_peers_retry_count`
@@ -177,7 +196,7 @@ Number of attempts to connect to peers, while waiting for them to submit genesis
 Has type `u64`. Can be configured via environment variable `IROHA_GENESIS_WAIT_FOR_PEERS_RETRY_COUNT`
 
 ```json
-0
+100
 ```
 
 ### `genesis.wait_for_peers_retry_period_ms`
@@ -187,7 +206,7 @@ Period in milliseconds in which to retry connecting to peers, while waiting for 
 Has type `u64`. Can be configured via environment variable `IROHA_GENESIS_WAIT_FOR_PEERS_RETRY_PERIOD_MS`
 
 ```json
-0
+500
 ```
 
 ## `kura`
@@ -255,7 +274,7 @@ Has type `LoggerConfiguration`. Can be configured via environment variable `IROH
 {
   "COMPACT_MODE": false,
   "LOG_FILE_PATH": null,
-  "MAX_LOG_LEVEL": "DEBUG",
+  "MAX_LOG_LEVEL": "INFO",
   "TELEMETRY_CAPACITY": 1000
 }
 ```
@@ -274,7 +293,7 @@ false
 
 If provided, logs will be copied to said file in the
 
-Has type `Option<PathBuf>`. Can be configured via environment variable `LOG_FILE_PATH`
+Has type `Option<std::path::PathBuf>`. Can be configured via environment variable `LOG_FILE_PATH`
 
 ```json
 null
@@ -284,10 +303,10 @@ null
 
 Maximum log level
 
-Has type `LevelEnv`. Can be configured via environment variable `MAX_LOG_LEVEL`
+Has type `handle::SyncValue<Level,handle::Singleton<Level>>`. Can be configured via environment variable `MAX_LOG_LEVEL`
 
 ```json
-"DEBUG"
+"INFO"
 ```
 
 ### `logger.telemetry_capacity`
@@ -409,7 +428,7 @@ Has type `SumeragiConfiguration`. Can be configured via environment variable `IR
 ```json
 {
   "BLOCK_TIME_MS": 1000,
-  "COMMIT_TIME_MS": 1000,
+  "COMMIT_TIME_MS": 2000,
   "MAILBOX": 100,
   "MAX_INSTRUCTION_NUMBER": 4096,
   "N_TOPOLOGY_SHIFTS_BEFORE_RESHUFFLE": 1,
@@ -418,7 +437,7 @@ Has type `SumeragiConfiguration`. Can be configured via environment variable `IR
     "public_key": "ed0100"
   },
   "TRUSTED_PEERS": [],
-  "TX_RECEIPT_TIME_MS": 200
+  "TX_RECEIPT_TIME_MS": 500
 }
 ```
 
@@ -439,7 +458,7 @@ Amount of time Peer waits for CommitMessage from the proxy tail.
 Has type `u64`. Can be configured via environment variable `SUMERAGI_COMMIT_TIME_MS`
 
 ```json
-1000
+2000
 ```
 
 ### `sumeragi.key_pair`
@@ -518,7 +537,7 @@ Amount of time Peer waits for TxReceipt from the leader.
 Has type `u64`. Can be configured via environment variable `SUMERAGI_TX_RECEIPT_TIME_MS`
 
 ```json
-200
+500
 ```
 
 ## `telemetry`
@@ -530,6 +549,8 @@ Has type `iroha_telemetry::Configuration`. Can be configured via environment var
 ```json
 {
   "FILE": null,
+  "MAX_EXPONENT": 4,
+  "MIN_PERIOD": 1,
   "NAME": null,
   "URL": null
 }
@@ -543,6 +564,26 @@ Has type `Option<PathBuf>`. Can be configured via environment variable `TELEMETR
 
 ```json
 null
+```
+
+### `telemetry.max_exponent`
+
+The maximum exponent of 2 that is used for increasing delay between reconnections
+
+Has type `u8`. Can be configured via environment variable `TELEMETRY_MAX_EXPONENT`
+
+```json
+4
+```
+
+### `telemetry.min_period`
+
+The minimum period of time in seconds to wait before reconnecting
+
+Has type `u64`. Can be configured via environment variable `TELEMETRY_MIN_PERIOD`
+
+```json
+1
 ```
 
 ### `telemetry.name`
@@ -574,10 +615,11 @@ Has type `ToriiConfiguration`. Can be configured via environment variable `IROHA
 ```json
 {
   "API_URL": "127.0.0.1:8080",
+  "MAX_CONTENT_LEN": 16384000,
   "MAX_INSTRUCTION_NUMBER": 4096,
-  "MAX_SUMERAGI_MESSAGE_SIZE": 16384000,
   "MAX_TRANSACTION_SIZE": 32768,
-  "P2P_ADDR": "127.0.0.1:1337"
+  "P2P_ADDR": "127.0.0.1:1337",
+  "STATUS_URL": "127.0.0.1:8180"
 }
 ```
 
@@ -591,6 +633,16 @@ Has type `String`. Can be configured via environment variable `TORII_API_URL`
 "127.0.0.1:8080"
 ```
 
+### `torii.max_content_len`
+
+Maximum number of bytes in raw message. Used to prevent from DOS attacks.
+
+Has type `usize`. Can be configured via environment variable `TORII_MAX_CONTENT_LEN`
+
+```json
+16384000
+```
+
 ### `torii.max_instruction_number`
 
 Maximum number of instruction per transaction. Used to prevent from DOS attacks.
@@ -599,16 +651,6 @@ Has type `u64`. Can be configured via environment variable `TORII_MAX_INSTRUCTIO
 
 ```json
 4096
-```
-
-### `torii.max_sumeragi_message_size`
-
-Maximum number of bytes in raw message. Used to prevent from DOS attacks.
-
-Has type `usize`. Can be configured via environment variable `TORII_MAX_SUMERAGI_MESSAGE_SIZE`
-
-```json
-16384000
 ```
 
 ### `torii.max_transaction_size`
@@ -629,6 +671,16 @@ Has type `String`. Can be configured via environment variable `TORII_P2P_ADDR`
 
 ```json
 "127.0.0.1:1337"
+```
+
+### `torii.status_url`
+
+Torii URL for reporting internal status for administration.
+
+Has type `String`. Can be configured via environment variable `TORII_STATUS_URL`
+
+```json
+"127.0.0.1:8180"
 ```
 
 ## `wsv`
@@ -716,7 +768,7 @@ Has type `MetadataLimits`. Can be configured via environment variable `WSV_DOMAI
 
 ### `wsv.ident_length_limits`
 
-[`LengthLimits`]for the number of chars in identifiers that can be stored in the WSV.
+[`LengthLimits`] for the number of chars in identifiers that can be stored in the WSV.
 
 Has type `LengthLimits`. Can be configured via environment variable `WSV_IDENT_LENGTH_LIMITS`
 

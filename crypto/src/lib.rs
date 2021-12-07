@@ -8,7 +8,6 @@ mod signature;
 mod varint;
 
 use std::{
-    convert::{TryFrom, TryInto},
     fmt::{self, Debug, Display, Formatter},
     str::FromStr,
 };
@@ -122,19 +121,19 @@ pub struct KeyGenConfiguration {
 
 impl KeyGenConfiguration {
     /// Use seed
-    pub fn use_seed(mut self, seed: Vec<u8>) -> KeyGenConfiguration {
+    pub fn use_seed(mut self, seed: Vec<u8>) -> Self {
         self.key_gen_option = Some(KeyGenOption::UseSeed(seed));
         self
     }
 
     /// Use private key
-    pub fn use_private_key(mut self, private_key: PrivateKey) -> KeyGenConfiguration {
+    pub fn use_private_key(mut self, private_key: PrivateKey) -> Self {
         self.key_gen_option = Some(KeyGenOption::FromPrivateKey(private_key));
         self
     }
 
     /// with algorithm
-    pub fn with_algorithm(mut self, algorithm: Algorithm) -> KeyGenConfiguration {
+    pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
         self.algorithm = algorithm;
         self
     }
@@ -165,7 +164,7 @@ impl KeyPair {
     pub fn generate_with_configuration(configuration: KeyGenConfiguration) -> Result<Self> {
         let key_gen_option: Option<UrsaKeyGenOption> = configuration
             .key_gen_option
-            .map(|key_gen_option| key_gen_option.try_into())
+            .map(TryInto::try_into)
             .transpose()?;
         let (public_key, private_key) = match configuration.algorithm {
             Algorithm::Ed25519 => Ed25519Sha512.keypair(key_gen_option),
@@ -186,6 +185,12 @@ impl KeyPair {
                 payload: private_key.as_ref().to_vec(),
             },
         })
+    }
+}
+
+impl From<KeyPair> for (PublicKey, PrivateKey) {
+    fn from(key_pair: KeyPair) -> Self {
+        (key_pair.public_key, key_pair.private_key)
     }
 }
 
@@ -297,7 +302,7 @@ impl<'de> Deserialize<'de> for PublicKey {
 pub struct PrivateKey {
     /// Digest function
     pub digest_function: String,
-    /// key payload
+    /// key payload. WARNING! Do not use `"string".as_bytes()` to obtain the key.
     #[serde(deserialize_with = "from_hex", serialize_with = "to_hex")]
     pub payload: Vec<u8>,
 }

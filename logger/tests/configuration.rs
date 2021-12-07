@@ -2,17 +2,14 @@
 
 use std::time::Duration;
 
-use iroha_logger::{
-    config::LoggerConfiguration,
-    info, init,
-    telemetry::{Telemetry, TelemetryFields},
-};
+use iroha_config::logger as config;
+use iroha_logger::{info, init, Configuration, Level, Telemetry, TelemetryFields};
 use tokio::time;
 
 #[tokio::test]
 async fn telemetry_separation_custom() {
-    let config = LoggerConfiguration {
-        max_log_level: iroha_logger::config::LevelEnv::TRACE,
+    let config = Configuration {
+        max_log_level: Level(config::Level::TRACE).into(),
         telemetry_capacity: 100,
         compact_mode: true,
         log_file_path: Some("/dev/stdout".into()),

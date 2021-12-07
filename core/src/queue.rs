@@ -6,10 +6,10 @@ use crossbeam_queue::ArrayQueue;
 use dashmap::{mapref::entry::Entry, DashMap};
 use eyre::{Report, Result};
 use iroha_crypto::HashOf;
-use iroha_data_model::transaction::VersionedTransaction;
+use iroha_data_model::transaction::prelude::*;
 use thiserror::Error;
 
-use self::config::QueueConfiguration;
+pub use self::config::Configuration;
 use crate::{prelude::*, wsv::WorldTrait};
 
 /// Lockfree queue for transactions
@@ -55,7 +55,7 @@ pub enum Error {
 
 impl Queue {
     /// Makes queue from configuration
-    pub fn from_configuration(cfg: &QueueConfiguration) -> Self {
+    pub fn from_configuration(cfg: &Configuration) -> Self {
         Self {
             queue: ArrayQueue::new(cfg.maximum_transactions_in_queue as usize),
             txs: DashMap::new(),
@@ -104,7 +104,7 @@ impl Queue {
     /// Pushes transaction into queue.
     ///
     /// # Errors
-    /// See [`Error`]
+    /// See [`enum@Error`]
     #[allow(
         clippy::unwrap_in_result,
         clippy::expect_used,
@@ -131,9 +131,9 @@ impl Queue {
                 // MST case
                 old_tx
                     .get_mut()
-                    .as_mut_inner_v1()
+                    .as_mut_v1()
                     .signatures
-                    .merge(tx.into_inner_v1().signatures);
+                    .merge(tx.into_v1().signatures);
                 return Ok(());
             }
             Entry::Vacant(entry) => entry,
@@ -141,9 +141,12 @@ impl Queue {
 
         entry.insert(tx);
 
-        if let Err(hash) = self.queue.push(hash) {
-            let (_, tx) = self.txs.remove(&hash).expect("Inserted just before match");
-            return Err((tx, Error::Full));
+        if let Err(err_hash) = self.queue.push(hash) {
+            let (_, err_tx) = self
+                .txs
+                .remove(&err_hash)
+                .expect("Inserted just before match");
+            return Err((err_tx, Error::Full));
         }
         Ok(())
     }
@@ -231,7 +234,7 @@ pub mod config {
     #[serde(rename_all = "UPPERCASE")]
     #[serde(default)]
     #[config(env_prefix = "QUEUE_")]
-    pub struct QueueConfiguration {
+    pub struct Configuration {
         /// The upper limit of the number of transactions per block.
         pub maximum_transactions_in_block: u32,
         /// The upper limit of the number of transactions waiting in this queue.
@@ -242,7 +245,7 @@ pub mod config {
         pub future_threshold_ms: u64,
     }
 
-    impl Default for QueueConfiguration {
+    impl Default for Configuration {
         fn default() -> Self {
             Self {
                 maximum_transactions_in_block: DEFAULT_MAXIMUM_TRANSACTIONS_IN_BLOCK,
@@ -308,11 +311,11 @@ mod tests {
 
     #[test]
     fn push_tx() {
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: 2,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: 100,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         let wsv = WorldStateView::new(world_with_test_domains(
             KeyPair::generate().unwrap().public_key,
@@ -326,11 +329,11 @@ mod tests {
     #[test]
     fn push_tx_overflow() {
         let max_txs_in_queue = 10;
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: 2,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: max_txs_in_queue,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         let wsv = WorldStateView::new(world_with_test_domains(
             KeyPair::generate().unwrap().public_key,
@@ -352,11 +355,11 @@ mod tests {
     #[test]
     fn push_tx_signature_condition_failure() {
         let max_txs_in_queue = 10;
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: 2,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: max_txs_in_queue,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         let wsv = WorldStateView::new(world_with_test_domains(
             KeyPair::generate().unwrap().public_key,
@@ -377,11 +380,11 @@ mod tests {
 
     #[test]
     fn push_multisignature_tx() {
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: 2,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: 100,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         let tx = Transaction::new(
             Vec::new(),
@@ -409,7 +412,7 @@ mod tests {
             .txs
             .get(&queue.queue.pop().unwrap())
             .unwrap()
-            .as_inner_v1()
+            .as_v1()
             .signatures
             .len();
         assert_eq!(signature_count, 2);
@@ -420,11 +423,11 @@ mod tests {
         let max_block_tx = 2;
         let alice_key = KeyPair::generate().expect("Failed to generate keypair.");
         let wsv = WorldStateView::new(world_with_test_domains(alice_key.public_key.clone()));
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: max_block_tx,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: 100,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         for _ in 0..5 {
             queue
@@ -447,11 +450,11 @@ mod tests {
         let wsv = WorldStateView::new(world_with_test_domains(alice_key.public_key.clone()));
         let tx = accepted_tx("alice", "wonderland", 100_000, Some(&alice_key));
         wsv.transactions.insert(tx.hash());
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: max_block_tx,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: 100,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         assert!(matches!(
             queue.push(tx, &wsv),
@@ -466,11 +469,11 @@ mod tests {
         let alice_key = KeyPair::generate().expect("Failed to generate keypair.");
         let wsv = WorldStateView::new(world_with_test_domains(alice_key.public_key.clone()));
         let tx = accepted_tx("alice", "wonderland", 100_000, Some(&alice_key));
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: max_block_tx,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: 100,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         queue.push(tx.clone(), &wsv).unwrap();
         wsv.transactions.insert(tx.hash());
@@ -483,11 +486,11 @@ mod tests {
         let max_block_tx = 6;
         let alice_key = KeyPair::generate().expect("Failed to generate keypair.");
         let wsv = WorldStateView::new(world_with_test_domains(alice_key.public_key.clone()));
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: max_block_tx,
             transaction_time_to_live_ms: 200,
             maximum_transactions_in_queue: 100,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         for _ in 0..(max_block_tx - 1) {
             queue
@@ -526,11 +529,11 @@ mod tests {
     fn transactions_available_after_pop() {
         let alice_key = KeyPair::generate().expect("Failed to generate keypair.");
         let wsv = WorldStateView::new(world_with_test_domains(alice_key.public_key.clone()));
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: 2,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: 100,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         queue
             .push(
@@ -560,11 +563,11 @@ mod tests {
         let wsv = Arc::new(WorldStateView::new(world_with_test_domains(
             alice_key.public_key.clone(),
         )));
-        let queue = Arc::new(Queue::from_configuration(&QueueConfiguration {
+        let queue = Arc::new(Queue::from_configuration(&Configuration {
             maximum_transactions_in_block: max_block_tx,
             transaction_time_to_live_ms: 100_000,
             maximum_transactions_in_queue: 100_000_000,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         }));
 
         let start_time = Instant::now();
@@ -594,7 +597,7 @@ mod tests {
                     wsv_arc_clone_2.transactions.insert(tx.hash());
                 }
                 // Simulate random small delays
-                thread::sleep(Duration::from_millis(rand::thread_rng().gen_range(0, 25)));
+                thread::sleep(Duration::from_millis(rand::thread_rng().gen_range(0..25)));
             }
         });
 
@@ -619,9 +622,9 @@ mod tests {
     #[test]
     fn push_tx_in_future() {
         let future_threshold_ms = 1000;
-        let queue = Queue::from_configuration(&QueueConfiguration {
+        let queue = Queue::from_configuration(&Configuration {
             future_threshold_ms,
-            ..QueueConfiguration::default()
+            ..Configuration::default()
         });
         let alice_key = KeyPair::generate().expect("Failed to generate keypair.");
         let wsv = WorldStateView::new(world_with_test_domains(alice_key.public_key.clone()));
@@ -629,7 +632,7 @@ mod tests {
         let mut tx = accepted_tx("alice", "wonderland", 100_000, Some(&alice_key));
         assert!(queue.push(tx.clone(), &wsv).is_ok());
         // tamper timestamp
-        tx.as_mut_inner_v1().payload.creation_time += 2 * future_threshold_ms;
+        tx.as_mut_v1().payload.creation_time += 2 * future_threshold_ms;
         assert!(matches!(queue.push(tx, &wsv), Err((_, Error::InFuture))));
         assert_eq!(queue.txs.len(), 1);
     }

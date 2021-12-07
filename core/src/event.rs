@@ -2,7 +2,7 @@
 //! This module contains descriptions of such an events and
 //! utilitary Iroha Special Instructions to work with them.
 
-use std::{convert::TryInto, fmt::Debug, time::Duration};
+use std::{fmt::Debug, time::Duration};
 
 use eyre::{eyre, Result, WrapErr};
 use futures::{SinkExt, StreamExt};
@@ -47,7 +47,7 @@ impl Consumer {
         }
         let SubscriptionRequest(filter): SubscriptionRequest =
             VersionedEventSocketMessage::decode_versioned(message.as_bytes())?
-                .into_inner_v1()
+                .into_v1()
                 .try_into()?;
 
         time::timeout(
@@ -93,7 +93,7 @@ impl Consumer {
         }
 
         if let EventSocketMessage::EventReceived =
-            VersionedEventSocketMessage::decode_versioned(message.as_bytes())?.into_inner_v1()
+            VersionedEventSocketMessage::decode_versioned(message.as_bytes())?.into_v1()
         {
             self.stream.flush().await?;
             Ok(())

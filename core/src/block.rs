@@ -5,23 +5,25 @@
 
 use std::{collections::BTreeSet, iter, marker::PhantomData};
 
-use dashmap::{iter::Iter as MapIter, mapref::one::Ref as MapRef, DashMap};
+use dashmap::{mapref::one::Ref as MapRef, DashMap};
 use eyre::{Context, Result};
 use iroha_crypto::{HashOf, KeyPair, SignatureOf, SignaturesOf};
-use iroha_data_model::{current_time, events::prelude::*, transaction::prelude::*};
-use iroha_derive::Io;
+use iroha_data_model::{
+    current_time, events::prelude::*, merkle::MerkleTree, transaction::prelude::*,
+};
+use iroha_macro::Io;
+use iroha_schema::IntoSchema;
 use iroha_version::{declare_versioned_with_scale, version_with_scale};
 use parity_scale_codec::{Decode, Encode};
 
 use crate::{
-    merkle::MerkleTree,
     prelude::*,
     smartcontracts::permissions::{IsInstructionAllowedBoxed, IsQueryAllowedBoxed},
     sumeragi::{
         network_topology::Topology,
         view_change::{Proof, ProofChain as ViewChangeProofs},
     },
-    tx::{VersionedAcceptedTransaction, VersionedValidTransaction},
+    tx::VersionedAcceptedTransaction,
     wsv::WorldTrait,
 };
 
@@ -49,21 +51,22 @@ pub struct Chain {
 
 impl Chain {
     /// Constructor.
+    #[inline]
     pub fn new() -> Self {
         Chain {
             blocks: DashMap::new(),
         }
     }
 
-    /// Put latest block.
+    /// Push latest block.
     pub fn push(&self, block: VersionedCommittedBlock) {
-        let height = block.as_inner_v1().header.height;
+        let height = block.as_v1().header.height;
         self.blocks.insert(height, block);
     }
 
     /// Iterator over height and block.
-    pub fn iter(&self) -> MapIter<u64, VersionedCommittedBlock> {
-        self.blocks.iter()
+    pub fn iter(&self) -> ChainIterator {
+        ChainIterator::new(self)
     }
 
     /// Latest block reference and its height.
@@ -72,22 +75,95 @@ impl Chain {
     }
 
     /// Length of the blockchain.
+    #[inline]
     pub fn len(&self) -> usize {
         self.blocks.len()
     }
 
     /// Whether blockchain is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
 }
 
-declare_versioned_with_scale!(VersionedPendingBlock 1..2, Debug, Clone, iroha_derive::FromVariant);
+/// Chain iterator
+pub struct ChainIterator<'a> {
+    chain: &'a Chain,
+    pos_front: u64,
+    pos_back: u64,
+}
+
+impl<'a> ChainIterator<'a> {
+    fn new(chain: &'a Chain) -> Self {
+        ChainIterator {
+            chain,
+            pos_front: 1,
+            pos_back: chain.len() as u64,
+        }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.pos_front > self.pos_back
+    }
+}
+
+impl<'a> Iterator for ChainIterator<'a> {
+    type Item = MapRef<'a, u64, VersionedCommittedBlock>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.is_exhausted() {
+            let val = self.chain.blocks.get(&self.pos_front);
+            self.pos_front += 1;
+            return val;
+        }
+        None
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.pos_front += n as u64;
+        self.next()
+    }
+
+    fn last(mut self) -> Option<Self::Item> {
+        self.pos_front = self.chain.len() as u64;
+        self.chain.blocks.get(&self.pos_front)
+    }
+
+    fn count(self) -> usize {
+        #[allow(clippy::cast_possible_truncation)]
+        let count = (self.chain.len() as u64 - (self.pos_front - 1)) as usize;
+        count
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        #[allow(clippy::cast_possible_truncation)]
+        let height = (self.chain.len() as u64 - (self.pos_front - 1)) as usize;
+        (height, Some(height))
+    }
+}
+
+impl<'a> DoubleEndedIterator for ChainIterator<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if !self.is_exhausted() {
+            let val = self.chain.blocks.get(&self.pos_back);
+            self.pos_back -= 1;
+            return val;
+        }
+        None
+    }
+
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        self.pos_back -= n as u64;
+        self.next_back()
+    }
+}
+
+declare_versioned_with_scale!(VersionedPendingBlock 1..2, Debug, Clone, iroha_macro::FromVariant);
 
 /// Transaction data is permanently recorded in files called blocks. Blocks are organized into
 /// a linear sequence over time (also known as the block chain).
 /// Blocks lifecycle starts from "Pending" state which is represented by `PendingBlock` struct.
-#[version_with_scale(n = 1, versioned = "VersionedPendingBlock", derive = "Debug, Clone")]
+#[version_with_scale(n = 1, versioned = "VersionedPendingBlock")]
 #[derive(Clone, Debug, Io, Encode, Decode)]
 pub struct PendingBlock {
     /// Unix time (in milliseconds) of block forming by a peer.
@@ -98,6 +174,7 @@ pub struct PendingBlock {
 
 impl PendingBlock {
     /// Create a new `PendingBlock` from transactions.
+    #[inline]
     pub fn new(transactions: Vec<VersionedAcceptedTransaction>) -> PendingBlock {
         #[allow(clippy::expect_used)]
         let timestamp = current_time().as_millis();
@@ -175,7 +252,7 @@ pub struct ChainedBlock {
 }
 
 /// Header of the block. The hash should be taken from its byte representation.
-#[derive(Clone, Debug, Io, Encode, Decode)]
+#[derive(Clone, Debug, Io, Encode, Decode, IntoSchema)]
 pub struct BlockHeader {
     /// Unix time (in milliseconds) of block forming by a peer.
     pub timestamp: u128,
@@ -198,10 +275,13 @@ pub struct BlockHeader {
 
 impl BlockHeader {
     /// Checks if it's a header of a genesis block.
+    #[inline]
     pub const fn is_genesis(&self) -> bool {
         self.height == 1
     }
 }
+
+use std::error::Error;
 
 impl ChainedBlock {
     /// Validate block transactions against current state of the world.
@@ -223,7 +303,8 @@ impl ChainedBlock {
                 Ok(tx) => txs.push(tx),
                 Err(tx) => {
                     iroha_logger::warn!(
-                        reason = %tx.as_inner_v1().rejection_reason,
+                        reason = %tx.as_v1().rejection_reason,
+                        caused_by = ?tx.as_v1().rejection_reason.source(),
                         "Transaction validation failed",
                     );
                     rejected.push(tx)
@@ -256,38 +337,42 @@ impl ChainedBlock {
     }
 }
 
-declare_versioned_with_scale!(VersionedValidBlock 1..2, Debug, Clone, iroha_derive::FromVariant);
+declare_versioned_with_scale!(VersionedValidBlock 1..2, Debug, Clone, iroha_macro::FromVariant, IntoSchema);
 
 impl VersionedValidBlock {
-    /// Same as [`as_v1`](`VersionedValidBlock::as_v1()`) but also does conversion
-    pub const fn as_inner_v1(&self) -> &ValidBlock {
+    /// Converts from `&VersionedValidBlock` to V1 reference
+    #[inline]
+    pub const fn as_v1(&self) -> &ValidBlock {
         match self {
-            Self::V1(v1) => &v1.0,
+            Self::V1(v1) => v1,
         }
     }
 
-    /// Same as [`as_inner_v1`](`VersionedValidBlock::as_inner_v1()`) but returns mutable reference
-    pub fn as_mut_inner_v1(&mut self) -> &mut ValidBlock {
+    /// Converts from `&mut VersionedValidBlock` to V1 mutable reference
+    #[inline]
+    pub fn as_mut_v1(&mut self) -> &mut ValidBlock {
         match self {
-            Self::V1(v1) => &mut v1.0,
+            Self::V1(v1) => v1,
         }
     }
 
-    /// Same as [`into_v1`](`VersionedValidBlock::into_v1()`) but also does conversion
-    pub fn into_inner_v1(self) -> ValidBlock {
+    /// Performs the conversion from `VersionedValidBlock` to V1
+    #[inline]
+    pub fn into_v1(self) -> ValidBlock {
         match self {
-            Self::V1(v1) => v1.0,
+            Self::V1(v1) => v1,
         }
     }
 
     /// Returns header of valid block
+    #[inline]
     pub const fn header(&self) -> &BlockHeader {
-        &self.as_inner_v1().header
+        &self.as_v1().header
     }
 
     /// Commit block to the store.
     pub fn commit(self) -> VersionedCommittedBlock {
-        self.into_inner_v1().commit().into()
+        self.into_v1().commit().into()
     }
 
     /// Validate block transactions against current state of the world.
@@ -297,47 +382,46 @@ impl VersionedValidBlock {
         is_instruction_allowed: &IsInstructionAllowedBoxed<W>,
         is_query_allowed: &IsQueryAllowedBoxed<W>,
     ) -> VersionedValidBlock {
-        self.into_inner_v1()
+        self.into_v1()
             .revalidate(wsv, is_instruction_allowed, is_query_allowed)
             .into()
     }
 
     /// Calculate hash of the current block.
     pub fn hash(&self) -> HashOf<Self> {
-        self.as_inner_v1().hash().transmute()
+        self.as_v1().hash().transmute()
     }
 
     /// Sign this block and get [`VersionedValidBlock`](`Self`).
     /// # Errors
     /// Look at [`ValidBlock`](`ValidBlock`) for more info
     pub fn sign(self, key_pair: KeyPair) -> Result<VersionedValidBlock> {
-        self.into_inner_v1().sign(key_pair).map(Into::into)
+        self.into_v1().sign(key_pair).map(Into::into)
     }
 
     /// Signatures that are verified with the `hash` of this block as `payload`.
     pub fn verified_signatures(
         &'_ self,
     ) -> impl Iterator<Item = &'_ SignatureOf<VersionedValidBlock>> + '_ {
-        self.as_inner_v1()
+        self.as_v1()
             .verified_signatures()
             .map(SignatureOf::transmute_ref)
     }
 
     /// Checks if there are no transactions in this block.
     pub fn is_empty(&self) -> bool {
-        self.as_inner_v1().is_empty()
+        self.as_v1().is_empty()
     }
 
     /// Checks if block has transactions that are already in blockchain.
     pub fn has_committed_transactions<W: WorldTrait>(&self, wsv: &WorldStateView<W>) -> bool {
-        self.as_inner_v1().has_committed_transactions(wsv)
+        self.as_v1().has_committed_transactions(wsv)
     }
 
     /// # Errors
     /// Asserts specific instruction number of instruction in transaction constraint
     pub fn check_instruction_len(&self, max_instruction_len: u64) -> Result<()> {
-        self.as_inner_v1()
-            .check_instruction_len(max_instruction_len)
+        self.as_v1().check_instruction_len(max_instruction_len)
     }
 
     /// Returns true if block can be send for discussion
@@ -359,8 +443,8 @@ impl VersionedValidBlock {
 }
 
 /// After full validation `ChainedBlock` can transform into `ValidBlock`.
-#[version_with_scale(n = 1, versioned = "VersionedValidBlock", derive = "Debug, Clone")]
-#[derive(Clone, Debug, Io, Encode, Decode)]
+#[version_with_scale(n = 1, versioned = "VersionedValidBlock")]
+#[derive(Clone, Debug, Io, Encode, Decode, IntoSchema)]
 pub struct ValidBlock {
     /// Header
     pub header: BlockHeader,
@@ -421,7 +505,7 @@ impl ValidBlock {
                     .collect(),
             }
             .validate(wsv, is_instruction_allowed, is_query_allowed)
-            .into_inner_v1()
+            .into_v1()
         }
     }
 
@@ -464,11 +548,37 @@ impl ValidBlock {
                 .iter()
                 .any(|transaction| transaction.is_in_blockchain(wsv))
     }
+
+    /// Creates dummy `ValidBlock`. Used in tests
+    ///
+    /// # Panics
+    /// If generating keys or block signing fails.
+    #[cfg(test)]
+    #[allow(clippy::restriction)]
+    pub fn new_dummy() -> Self {
+        ValidBlock {
+            header: BlockHeader {
+                timestamp: 0,
+                height: 1,
+                previous_block_hash: EmptyChainHash::default().into(),
+                transactions_hash: EmptyChainHash::default().into(),
+                rejected_transactions_hash: EmptyChainHash::default().into(),
+                view_change_proofs: ViewChangeProofs::empty(),
+                invalidated_blocks_hashes: Vec::new(),
+                genesis_topology: None,
+            },
+            rejected_transactions: vec![],
+            transactions: vec![],
+            signatures: BTreeSet::default(),
+        }
+        .sign(KeyPair::generate().unwrap())
+        .unwrap()
+    }
 }
 
 impl From<&VersionedValidBlock> for Vec<Event> {
     fn from(block: &VersionedValidBlock) -> Self {
-        block.as_inner_v1().into()
+        block.as_v1().into()
     }
 }
 
@@ -512,44 +622,44 @@ impl From<&ValidBlock> for Vec<Event> {
     }
 }
 
-declare_versioned_with_scale!(VersionedCommittedBlock 1..2, Debug, Clone, iroha_derive::FromVariant);
+declare_versioned_with_scale!(VersionedCommittedBlock 1..2, Debug, Clone, iroha_macro::FromVariant, IntoSchema);
 
 impl VersionedCommittedBlock {
-    /// Same as [`as_v1`](`VersionedCommittedBlock::as_v1()`) but also does conversion
-    pub const fn as_inner_v1(&self) -> &CommittedBlock {
+    /// Converts from `&VersionedCommittedBlock` to V1 reference
+    pub const fn as_v1(&self) -> &CommittedBlock {
         match self {
-            Self::V1(v1) => &v1.0,
+            Self::V1(v1) => v1,
         }
     }
 
-    /// Same as [`as_inner_v1`](`VersionedCommittedBlock::as_inner_v1()`) but returns mutable reference
-    pub fn as_mut_inner_v1(&mut self) -> &mut CommittedBlock {
+    /// Converts from `&mut VersionedCommittedBlock` to V1 mutable reference
+    pub fn as_mut_v1(&mut self) -> &mut CommittedBlock {
         match self {
-            Self::V1(v1) => &mut v1.0,
+            Self::V1(v1) => v1,
         }
     }
 
-    /// Same as [`into_v1`](`VersionedCommittedBlock::into_v1()`) but also does conversion
-    pub fn into_inner_v1(self) -> CommittedBlock {
+    /// Performs the conversion from `VersionedCommittedBlock` to V1
+    pub fn into_v1(self) -> CommittedBlock {
         match self {
-            Self::V1(v1) => v1.into(),
+            Self::V1(v1) => v1,
         }
     }
 
     /// Calculate hash of the current block.
     /// `VersionedCommitedBlock` should have the same hash as `VersionedCommitedBlock`.
     pub fn hash(&self) -> HashOf<Self> {
-        self.as_inner_v1().hash().transmute()
+        self.as_v1().hash().transmute()
     }
 
     /// Returns header of valid block
     pub const fn header(&self) -> &BlockHeader {
-        &self.as_inner_v1().header
+        &self.as_v1().header
     }
 
     /// Signatures that are verified with the `hash` of this block as `payload`.
     pub fn verified_signatures(&'_ self) -> impl Iterator<Item = &'_ SignatureOf<Self>> + '_ {
-        self.as_inner_v1()
+        self.as_v1()
             .verified_signatures()
             .map(SignatureOf::transmute_ref)
     }
@@ -557,8 +667,12 @@ impl VersionedCommittedBlock {
 
 /// When Kura receives `ValidBlock`, the block is stored and
 /// then sent to later stage of the pipeline as `CommitedBlock`.
-#[version_with_scale(n = 1, versioned = "VersionedCommittedBlock", derive = "Debug, Clone")]
-#[derive(Clone, Debug, Io, Encode, Decode)]
+#[version_with_scale(
+    n = 1,
+    versioned = "VersionedCommittedBlock",
+    derive = "Debug, Clone, iroha_schema::IntoSchema"
+)]
+#[derive(Clone, Debug, Io, Encode, Decode, IntoSchema)]
 pub struct CommittedBlock {
     /// Header
     pub header: BlockHeader,
@@ -603,14 +717,16 @@ impl From<CommittedBlock> for ValidBlock {
 }
 
 impl From<VersionedCommittedBlock> for VersionedValidBlock {
+    #[inline]
     fn from(block: VersionedCommittedBlock) -> Self {
-        ValidBlock::from(block.into_inner_v1()).into()
+        ValidBlock::from(block.into_v1()).into()
     }
 }
 
 impl From<&VersionedCommittedBlock> for Vec<Event> {
+    #[inline]
     fn from(block: &VersionedCommittedBlock) -> Self {
-        block.as_inner_v1().into()
+        block.as_v1().into()
     }
 }
 
@@ -623,9 +739,7 @@ impl From<&CommittedBlock> for Vec<Event> {
             .map(|transaction| {
                 PipelineEvent::new(
                     PipelineEntityType::Transaction,
-                    PipelineStatus::Rejected(
-                        transaction.as_inner_v1().rejection_reason.clone().into(),
-                    ),
+                    PipelineStatus::Rejected(transaction.as_v1().rejection_reason.clone().into()),
                     transaction.hash().into(),
                 )
                 .into()
@@ -674,35 +788,71 @@ impl From<&CommittedBlock> for Vec<Event> {
 mod tests {
     #![allow(clippy::restriction)]
 
-    use std::collections::BTreeSet;
-
-    use iroha_crypto::KeyPair;
-
-    use crate::{
-        block::{BlockHeader, EmptyChainHash, ValidBlock},
-        sumeragi::view_change,
-    };
+    use super::*;
 
     #[test]
     pub fn committed_and_valid_block_hashes_are_equal() {
-        let valid_block = ValidBlock {
-            header: BlockHeader {
-                timestamp: 0,
-                height: 0,
-                previous_block_hash: EmptyChainHash::default().into(),
-                transactions_hash: EmptyChainHash::default().into(),
-                rejected_transactions_hash: EmptyChainHash::default().into(),
-                view_change_proofs: view_change::ProofChain::empty(),
-                invalidated_blocks_hashes: Vec::new(),
-                genesis_topology: None,
-            },
-            rejected_transactions: vec![],
-            transactions: vec![],
-            signatures: BTreeSet::default(),
+        let valid_block = ValidBlock::new_dummy();
+        let committed_block = valid_block.clone().commit();
+
+        assert_eq!(*valid_block.hash(), *committed_block.hash())
+    }
+
+    #[test]
+    pub fn chain_iter_returns_blocks_ordered() {
+        const BLOCK_COUNT: usize = 10;
+        let chain = Chain::new();
+
+        let mut block = ValidBlock::new_dummy().commit();
+
+        for i in 1..=BLOCK_COUNT {
+            block.header.height = i as u64;
+            chain.push(block.clone().into());
         }
-        .sign(KeyPair::generate().unwrap())
-        .unwrap();
-        let commited_block = valid_block.clone().commit();
-        assert_eq!(valid_block.hash().transmute(), commited_block.hash())
+
+        assert_eq!(
+            (BLOCK_COUNT - 5..=BLOCK_COUNT)
+                .map(|i| i as u64)
+                .collect::<Vec<_>>(),
+            chain
+                .iter()
+                .skip(BLOCK_COUNT - 6)
+                .map(|b| *b.key())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(BLOCK_COUNT - 2, chain.iter().skip(2).count());
+        assert_eq!(3, *chain.iter().nth(2).unwrap().key());
+    }
+
+    #[test]
+    pub fn chain_rev_iter_returns_blocks_ordered() {
+        const BLOCK_COUNT: usize = 10;
+        let chain = Chain::new();
+
+        let mut block = ValidBlock::new_dummy().commit();
+
+        for i in 1..=BLOCK_COUNT {
+            block.header.height = i as u64;
+            chain.push(block.clone().into());
+        }
+
+        assert_eq!(
+            (1..=BLOCK_COUNT - 4)
+                .rev()
+                .map(|i| i as u64)
+                .collect::<Vec<_>>(),
+            chain
+                .iter()
+                .rev()
+                .skip(BLOCK_COUNT - 6)
+                .map(|b| *b.key())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            (BLOCK_COUNT - 2) as u64,
+            *chain.iter().nth_back(2).unwrap().key()
+        );
     }
 }
