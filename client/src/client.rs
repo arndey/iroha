@@ -14,6 +14,7 @@ use iroha_config::{GetConfiguration, PostConfiguration};
 use iroha_crypto::{HashOf, KeyPair};
 use iroha_data_model::prelude::*;
 use iroha_logger::prelude::*;
+use iroha_telemetry::metrics::Status;
 use iroha_version::prelude::*;
 use rand::Rng;
 use serde::de::DeserializeOwned;
@@ -29,7 +30,7 @@ pub struct Client {
     /// Url for accessing iroha node
     pub torii_url: String,
     /// Url to report status for administration
-    pub status_url: String,
+    pub telemetry_url: String,
     /// Maximum number of instructions in blockchain
     pub max_instruction_number: u64,
     /// Accounts keypair
@@ -53,7 +54,7 @@ impl Client {
     pub fn new(configuration: &Configuration) -> Self {
         Self {
             torii_url: configuration.torii_api_url.clone(),
-            status_url: configuration.torii_status_url.clone(),
+            telemetry_url: configuration.torii_telemetry_url.clone(),
             max_instruction_number: configuration.max_instruction_number,
             key_pair: KeyPair {
                 public_key: configuration.public_key.clone(),
@@ -73,7 +74,7 @@ impl Client {
     pub fn with_headers(configuration: &Configuration, headers: HashMap<String, String>) -> Self {
         Self {
             torii_url: configuration.torii_api_url.clone(),
-            status_url: configuration.torii_status_url.clone(),
+            telemetry_url: configuration.torii_telemetry_url.clone(),
             max_instruction_number: configuration.max_instruction_number,
             key_pair: KeyPair {
                 public_key: configuration.public_key.clone(),
@@ -499,7 +500,7 @@ impl Client {
     /// Fails if sending request or decoding fails
     pub fn get_status(&self) -> Result<Status> {
         let resp = http_client::get::<_, Vec<(&str, &str)>, _, _>(
-            format!("{}/{}", &self.status_url, uri::STATUS),
+            format!("{}/{}", &self.telemetry_url, uri::STATUS),
             Bytes::new(),
             vec![],
             self.headers.clone(),
@@ -533,16 +534,14 @@ impl EventIterator {
     ) -> Result<EventIterator> {
         let mut stream = http_client::web_socket_connect(url, headers)?;
         stream.write_message(WebSocketMessage::Binary(
-            VersionedEventSocketMessage::from(EventSocketMessage::from(SubscriptionRequest(
-                event_filter,
-            )))
-            .encode_versioned()?,
+            VersionedEventSubscriberMessage::from(EventSubscriberMessage::from(event_filter))
+                .encode_versioned()?,
         ))?;
         loop {
             match stream.read_message() {
                 Ok(WebSocketMessage::Binary(message)) => {
-                    if let EventSocketMessage::SubscriptionAccepted =
-                        VersionedEventSocketMessage::decode_versioned(&message)?.into_v1()
+                    if let EventPublisherMessage::SubscriptionAccepted =
+                        VersionedEventPublisherMessage::decode_versioned(&message)?.into_v1()
                     {
                         break;
                     }
@@ -567,22 +566,23 @@ impl Iterator for EventIterator {
             match self.stream.read_message() {
                 Ok(WebSocketMessage::Binary(message)) => {
                     let event_socket_message =
-                        match VersionedEventSocketMessage::decode_versioned(&message) {
+                        match VersionedEventPublisherMessage::decode_versioned(&message) {
                             Ok(event_socket_message) => event_socket_message.into_v1(),
                             Err(err) => return Some(Err(err.into())),
                         };
                     let event = match event_socket_message {
-                        EventSocketMessage::Event(event) => event,
+                        EventPublisherMessage::Event(event) => event,
                         msg => return Some(Err(eyre!("Expected Event but got {:?}", msg))),
                     };
-                    let versioned_message =
-                        match VersionedEventSocketMessage::from(EventSocketMessage::EventReceived)
-                            .encode_versioned()
-                            .wrap_err("Failed to serialize receipt.")
-                        {
-                            Ok(msg) => msg,
-                            Err(e) => return Some(Err(e)),
-                        };
+                    let versioned_message = match VersionedEventSubscriberMessage::from(
+                        EventSubscriberMessage::EventReceived,
+                    )
+                    .encode_versioned()
+                    .wrap_err("Failed to serialize receipt.")
+                    {
+                        Ok(msg) => msg,
+                        Err(e) => return Some(Err(e)),
+                    };
                     return match self
                         .stream
                         .write_message(WebSocketMessage::Binary(versioned_message))
@@ -606,7 +606,7 @@ impl Debug for Client {
         f.debug_struct("Client")
             .field("public_key", &self.key_pair.public_key)
             .field("torii_url", &self.torii_url)
-            .field("status_url", &self.status_url)
+            .field("telemetry_url", &self.telemetry_url)
             .finish()
     }
 }
@@ -662,9 +662,9 @@ pub mod domain {
         FindAllDomains::new()
     }
 
-    /// Get query to get all domain by name
-    pub fn by_name(domain_name: impl Into<EvaluatesTo<Name>>) -> FindDomainByName {
-        FindDomainByName::new(domain_name)
+    /// Get query to get all domain by id
+    pub fn by_id(domain_id: impl Into<EvaluatesTo<DomainId>>) -> FindDomainById {
+        FindDomainById::new(domain_id)
     }
 }
 

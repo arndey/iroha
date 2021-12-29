@@ -1,11 +1,10 @@
-//! This module contains query related Iroha functionality.
+//! Query related Iroha functionality.
 
 use std::{error::Error as StdError, fmt};
 
 use eyre::{eyre, Result};
 use iroha_crypto::SignatureOf;
 use iroha_data_model::{prelude::*, query};
-use iroha_macro::Io;
 use iroha_version::scale::DecodeVersioned;
 use parity_scale_codec::{Decode, Encode};
 use thiserror::Error;
@@ -16,11 +15,11 @@ use warp::{
     Reply,
 };
 
-use super::permissions::IsQueryAllowedBoxed;
+use super::{permissions::IsQueryAllowedBoxed, FindError};
 use crate::{prelude::*, WorldTrait};
 
 /// Query Request verified on the Iroha node side.
-#[derive(Debug, Io, Encode, Decode)]
+#[derive(Debug, Decode, Encode)]
 pub struct VerifiedQueryRequest {
     /// Payload.
     payload: query::Payload,
@@ -30,23 +29,23 @@ pub struct VerifiedQueryRequest {
 
 impl VerifiedQueryRequest {
     /// Statefully validate query.
-    /// Checks whether account exists and has the corresponding public key, also check permissions based on this account.
     ///
     /// # Errors
-    /// Returns and error if one of the previously mentioned checks did not pass.
+    /// if:
+    /// - Account doesn't exist.
+    /// - Account doesn't have the correct public key.
+    /// - Account has the correct permissions.
     pub fn validate<W: WorldTrait>(
         self,
         wsv: &WorldStateView<W>,
         query_validator: &IsQueryAllowedBoxed<W>,
     ) -> Result<ValidQueryRequest, Error> {
-        let account_has_public_key = wsv
-            .map_account(&self.payload.account_id, |account| {
-                account.signatories.contains(&self.signature.public_key)
-            })
-            .map_err(Error::Find)?;
+        let account_has_public_key = wsv.map_account(&self.payload.account_id, |account| {
+            account.signatories.contains(&self.signature.public_key)
+        })?;
         if !account_has_public_key {
             return Err(Error::Signature(eyre!(
-                "Public key used for the signature does not correspond to the account."
+                "Signature public key doesn't correspond to the account."
             )));
         }
         query_validator
@@ -74,7 +73,7 @@ impl TryFrom<SignedQueryRequest> for VerifiedQueryRequest {
 }
 
 /// Query Request statefully validated on the Iroha node side.
-#[derive(Debug, Io, Encode, Decode)]
+#[derive(Debug, Decode, Encode)]
 pub struct ValidQueryRequest {
     query: QueryBox,
 }
@@ -83,8 +82,9 @@ impl ValidQueryRequest {
     /// Execute contained query on the [`WorldStateView`].
     ///
     /// # Errors
-    /// Returns an error if the query execution fails.
-    pub fn execute<W: WorldTrait>(&self, wsv: &WorldStateView<W>) -> Result<Value> {
+    /// Forwards `self.query.execute` error.
+    #[inline]
+    pub fn execute<W: WorldTrait>(&self, wsv: &WorldStateView<W>) -> Result<Value, Error> {
         self.query.execute(wsv)
     }
 }
@@ -133,7 +133,19 @@ pub enum Error {
     Permission(String),
     /// Query found nothing.
     #[error("Query found nothing: {0}")]
-    Find(eyre::Error),
+    Find(#[source] Box<FindError>),
+    /// Evaluate
+    #[error("Evaluation failed. {0}")]
+    Evaluate(#[source] eyre::Report),
+    /// Conversion failures
+    #[error("Conversion failed")]
+    Conversion(#[source] eyre::Report),
+}
+
+impl From<FindError> for Error {
+    fn from(err: FindError) -> Self {
+        Error::Find(Box::new(err))
+    }
 }
 
 impl Error {
@@ -141,14 +153,15 @@ impl Error {
     pub const fn status_code(&self) -> StatusCode {
         use Error::*;
         match *self {
-            Decode(_) | Version(_) => StatusCode::BAD_REQUEST,
+            Conversion(_) | Decode(_) | Version(_) => StatusCode::BAD_REQUEST,
             Signature(_) => StatusCode::UNAUTHORIZED,
-            Permission(_) | Find(_) => StatusCode::NOT_FOUND,
+            Evaluate(_) | Permission(_) | Find(_) => StatusCode::NOT_FOUND,
         }
     }
 }
 
 impl Reply for Error {
+    #[inline]
     fn into_response(self) -> Response {
         reply::with_status(self.to_string(), self.status_code()).into_response()
     }
@@ -166,25 +179,25 @@ impl TryFrom<&Bytes> for VerifiedQueryRequest {
 }
 
 impl<W: WorldTrait> ValidQuery<W> for QueryBox {
-    fn execute(&self, wsv: &WorldStateView<W>) -> Result<Value> {
+    fn execute(&self, wsv: &WorldStateView<W>) -> Result<Value, Error> {
         use QueryBox::*;
 
         match self {
             FindAllAccounts(query) => query.execute_into_value(wsv),
             FindAccountById(query) => query.execute_into_value(wsv),
             FindAccountsByName(query) => query.execute_into_value(wsv),
-            FindAccountsByDomainName(query) => query.execute_into_value(wsv),
+            FindAccountsByDomainId(query) => query.execute_into_value(wsv),
             FindAllAssets(query) => query.execute_into_value(wsv),
             FindAllAssetsDefinitions(query) => query.execute_into_value(wsv),
             FindAssetById(query) => query.execute_into_value(wsv),
             FindAssetsByName(query) => query.execute_into_value(wsv),
             FindAssetsByAccountId(query) => query.execute_into_value(wsv),
             FindAssetsByAssetDefinitionId(query) => query.execute_into_value(wsv),
-            FindAssetsByDomainName(query) => query.execute_into_value(wsv),
-            FindAssetsByDomainNameAndAssetDefinitionId(query) => query.execute_into_value(wsv),
+            FindAssetsByDomainId(query) => query.execute_into_value(wsv),
+            FindAssetsByDomainIdAndAssetDefinitionId(query) => query.execute_into_value(wsv),
             FindAssetQuantityById(query) => query.execute_into_value(wsv),
             FindAllDomains(query) => query.execute_into_value(wsv),
-            FindDomainByName(query) => query.execute_into_value(wsv),
+            FindDomainById(query) => query.execute_into_value(wsv),
             FindDomainKeyValueByIdAndKey(query) => query.execute_into_value(wsv),
             FindAllPeers(query) => query.execute_into_value(wsv),
             FindAssetKeyValueByIdAndKey(query) => query.execute_into_value(wsv),
@@ -214,15 +227,15 @@ mod tests {
     use crate::wsv::World;
 
     static ALICE_KEYS: Lazy<KeyPair> = Lazy::new(|| KeyPair::generate().unwrap());
-    static ALICE_ID: Lazy<AccountId> = Lazy::new(|| AccountId::new("alice", "wonderland"));
+    static ALICE_ID: Lazy<AccountId> = Lazy::new(|| AccountId::test("alice", "wonderland"));
 
     fn world_with_test_domains() -> World {
         let domains = DomainsMap::new();
-        let mut domain = Domain::new("wonderland");
+        let mut domain = Domain::test("wonderland");
         let mut account = Account::new(ALICE_ID.clone());
         account.signatories.push(ALICE_KEYS.public_key.clone());
         domain.accounts.insert(ALICE_ID.clone(), account);
-        let asset_definition_id = AssetDefinitionId::new("rose", "wonderland");
+        let asset_definition_id = AssetDefinitionId::test("rose", "wonderland");
         domain.asset_definitions.insert(
             asset_definition_id.clone(),
             AssetDefinitionEntry::new(
@@ -230,26 +243,27 @@ mod tests {
                 ALICE_ID.clone(),
             ),
         );
-        domains.insert("wonderland".to_string(), domain);
+        domains.insert(DomainId::test("wonderland"), domain);
         World::with(domains, PeersIds::new())
     }
 
     #[test]
     fn asset_store() -> Result<()> {
         let wsv = WorldStateView::new(world_with_test_domains());
-        let account_id = AccountId::new("alice", "wonderland");
-        let asset_definition_id = AssetDefinitionId::new("rose", "wonderland");
+        let account_id = AccountId::test("alice", "wonderland");
+        let asset_definition_id = AssetDefinitionId::test("rose", "wonderland");
         let asset_id = AssetId::new(asset_definition_id, account_id);
         let mut store = Metadata::new();
         store
             .insert_with_limits(
-                "Bytes".to_owned(),
+                Name::test("Bytes"),
                 Value::Vec(vec![Value::U32(1), Value::U32(2), Value::U32(3)]),
                 MetadataLimits::new(10, 100),
             )
             .unwrap();
         wsv.add_asset(Asset::new(asset_id.clone(), AssetValue::Store(store)))?;
-        let bytes = FindAssetKeyValueByIdAndKey::new(asset_id, "Bytes".to_owned()).execute(&wsv)?;
+        let bytes =
+            FindAssetKeyValueByIdAndKey::new(asset_id, Name::test("Bytes")).execute(&wsv)?;
         assert_eq!(
             bytes,
             Value::Vec(vec![Value::U32(1), Value::U32(2), Value::U32(3)])
@@ -262,13 +276,13 @@ mod tests {
         let wsv = WorldStateView::new(world_with_test_domains());
         wsv.modify_account(&ALICE_ID, |account| {
             account.metadata.insert_with_limits(
-                "Bytes".to_string(),
+                Name::test("Bytes"),
                 Value::Vec(vec![Value::U32(1), Value::U32(2), Value::U32(3)]),
                 MetadataLimits::new(10, 100),
             )?;
             Ok(())
         })?;
-        let bytes = FindAccountKeyValueByIdAndKey::new(ALICE_ID.clone(), "Bytes".to_owned())
+        let bytes = FindAccountKeyValueByIdAndKey::new(ALICE_ID.clone(), Name::test("Bytes"))
             .execute(&wsv)?;
         assert_eq!(
             bytes,
@@ -312,9 +326,9 @@ mod tests {
     #[test]
     fn domain_metadata() -> Result<()> {
         let wsv = WorldStateView::new(world_with_test_domains());
-        let domain_name = "wonderland".to_owned();
-        let key = "Bytes".to_owned();
-        wsv.modify_domain(&domain_name, |domain| {
+        let domain_id = DomainId::test("wonderland");
+        let key = Name::test("Bytes");
+        wsv.modify_domain(&domain_id, |domain| {
             domain.metadata.insert_with_limits(
                 key.clone(),
                 Value::Vec(vec![Value::U32(1), Value::U32(2), Value::U32(3)]),
@@ -322,7 +336,7 @@ mod tests {
             )?;
             Ok(())
         })?;
-        let bytes = FindDomainKeyValueByIdAndKey::new(domain_name, key).execute(&wsv)?;
+        let bytes = FindDomainKeyValueByIdAndKey::new(domain_id, key).execute(&wsv)?;
         assert_eq!(
             bytes,
             Value::Vec(vec![Value::U32(1), Value::U32(2), Value::U32(3)])

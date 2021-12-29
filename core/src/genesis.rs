@@ -16,7 +16,7 @@ use crate::{
     kura::KuraTrait,
     sumeragi::{
         network_topology::{GenesisBuilder as GenesisTopologyBuilder, Topology},
-        Sumeragi,
+        FaultInjection, SumeragiWithFault,
     },
     tx::VersionedAcceptedTransaction,
     wsv::WorldTrait,
@@ -54,14 +54,19 @@ pub trait GenesisNetworkTrait:
         network: Addr<IrohaNetwork>,
     ) -> Result<Topology>;
 
+    // FIXME: Having `ctx` reference and `sumaregi` reference here is not ideal.
+    // The way it is currently designed, this function is called from sumeragi and then calls sumeragi, while being in an unrelated module.
+    // This needs to be restructured.
+
     /// Submits genesis transactions.
     ///
     /// # Errors
     /// Returns error if waiting for peers or genesis round itself fails
-    async fn submit_transactions<K: KuraTrait, W: WorldTrait>(
+    async fn submit_transactions<K: KuraTrait, W: WorldTrait, F: FaultInjection>(
         &self,
-        sumeragi: &mut Sumeragi<Self, K, W>,
+        sumeragi: &mut SumeragiWithFault<Self, K, W, F>,
         network: Addr<IrohaNetwork>,
+        ctx: &mut iroha_actor::Context<SumeragiWithFault<Self, K, W, F>>,
     ) -> Result<()> {
         let genesis_topology = self
             .wait_for_peers(sumeragi.peer_id.clone(), sumeragi.topology.clone(), network)
@@ -69,7 +74,7 @@ pub trait GenesisNetworkTrait:
         time::sleep(Duration::from_millis(self.genesis_submission_delay_ms())).await;
         iroha_logger::info!("Initializing iroha using the genesis block.");
         sumeragi
-            .start_genesis_round(self.deref().clone(), genesis_topology)
+            .start_genesis_round(self.deref().clone(), genesis_topology, ctx)
             .await
     }
 
@@ -105,7 +110,7 @@ async fn try_get_online_topology(
 ) -> Result<Topology> {
     let (online_peers, offline_peers) =
         check_peers_status(this_peer_id, network_topology, network).await;
-    let set_a_len = network_topology.min_votes_for_commit() as usize;
+    let set_a_len = network_topology.min_votes_for_commit();
     if online_peers.len() < set_a_len {
         return Err(eyre!("Not enough online peers for consensus."));
     }
@@ -234,16 +239,23 @@ impl RawGenesisBlock {
         let file = File::open(&path).wrap_err(format!("Failed to open {:?}", &path))?;
         let reader = BufReader::new(file);
         serde_json::from_reader(reader).wrap_err(format!(
-            "Failed to deserialise raw genesis block from {:?}",
+            "Failed to deserialize raw genesis block from {:?}",
             &path
         ))
     }
 
     /// Create a [`RawGenesisBlock`] with specified [`Domain`] and [`NewAccount`].
-    pub fn new(name: &str, domain_name: &str, public_key: &PublicKey) -> Self {
-        RawGenesisBlock {
-            transactions: vec![GenesisTransaction::new(name, domain_name, public_key)],
-        }
+    ///
+    /// # Errors
+    /// Fails if `account_name` or `domain_name` is invalid
+    pub fn new(account_name: &str, domain_name: &str, public_key: &PublicKey) -> Result<Self> {
+        Ok(RawGenesisBlock {
+            transactions: vec![GenesisTransaction::new(
+                account_name,
+                domain_name,
+                public_key,
+            )?],
+        })
     }
 }
 
@@ -266,7 +278,7 @@ impl GenesisTransaction {
     ) -> Result<VersionedAcceptedTransaction> {
         let transaction = Transaction::new(
             self.isi.clone(),
-            <Account as Identifiable>::Id::genesis_account(),
+            <Account as Identifiable>::Id::genesis(),
             GENESIS_TRANSACTIONS_TTL_MS,
         )
         .sign(genesis_key_pair)?;
@@ -274,20 +286,26 @@ impl GenesisTransaction {
     }
 
     /// Create a [`GenesisTransaction`] with the specified [`Domain`] and [`NewAccount`].
-    pub fn new(name: &str, domain: &str, pubkey: &PublicKey) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Fails if `account_name` or `domain_name` is invalid
+    pub fn new(account_name: &str, domain_name: &str, public_key: &PublicKey) -> Result<Self> {
+        Ok(Self {
             isi: vec![
-                RegisterBox::new(IdentifiableBox::Domain(Domain::new(domain).into())).into(),
+                RegisterBox::new(IdentifiableBox::from(Domain::new(DomainId::new(
+                    domain_name,
+                )?)))
+                .into(),
                 RegisterBox::new(IdentifiableBox::NewAccount(
                     NewAccount::with_signatory(
-                        iroha_data_model::account::Id::new(name, domain),
-                        pubkey.clone(),
+                        iroha_data_model::account::Id::new(account_name, domain_name)?,
+                        public_key.clone(),
                     )
                     .into(),
                 ))
                 .into(),
             ],
-        }
+        })
     }
 }
 

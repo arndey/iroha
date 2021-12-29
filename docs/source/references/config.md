@@ -30,12 +30,14 @@ The following is the default configuration used by Iroha.
     "TX_RECEIPT_TIME_MS": 500,
     "N_TOPOLOGY_SHIFTS_BEFORE_RESHUFFLE": 1,
     "MAX_INSTRUCTION_NUMBER": 4096,
-    "MAILBOX": 100
+    "MAILBOX": 100,
+    "GOSSIP_BATCH_SIZE": 500,
+    "GOSSIP_PERIOD_MS": 1000
   },
   "TORII": {
     "P2P_ADDR": "127.0.0.1:1337",
     "API_URL": "127.0.0.1:8080",
-    "STATUS_URL": "127.0.0.1:8180",
+    "TELEMETRY_URL": "127.0.0.1:8180",
     "MAX_TRANSACTION_SIZE": 32768,
     "MAX_CONTENT_LEN": 16384000,
     "MAX_INSTRUCTION_NUMBER": 4096
@@ -429,6 +431,8 @@ Has type `SumeragiConfiguration`. Can be configured via environment variable `IR
 {
   "BLOCK_TIME_MS": 1000,
   "COMMIT_TIME_MS": 2000,
+  "GOSSIP_BATCH_SIZE": 500,
+  "GOSSIP_PERIOD_MS": 1000,
   "MAILBOX": 100,
   "MAX_INSTRUCTION_NUMBER": 4096,
   "N_TOPOLOGY_SHIFTS_BEFORE_RESHUFFLE": 1,
@@ -459,6 +463,26 @@ Has type `u64`. Can be configured via environment variable `SUMERAGI_COMMIT_TIME
 
 ```json
 2000
+```
+
+### `sumeragi.gossip_batch_size`
+
+Maximum number of transactions in tx gossip batch message. While configuring this, attention should be payed to `p2p` max message size.
+
+Has type `usize`. Can be configured via environment variable `SUMERAGI_GOSSIP_BATCH_SIZE`
+
+```json
+500
+```
+
+### `sumeragi.gossip_period_ms`
+
+Period in milliseconds for pending transaction gossiping between peers.
+
+Has type `u64`. Can be configured via environment variable `SUMERAGI_GOSSIP_PERIOD_MS`
+
+```json
+1000
 ```
 
 ### `sumeragi.key_pair`
@@ -619,7 +643,7 @@ Has type `ToriiConfiguration`. Can be configured via environment variable `IROHA
   "MAX_INSTRUCTION_NUMBER": 4096,
   "MAX_TRANSACTION_SIZE": 32768,
   "P2P_ADDR": "127.0.0.1:1337",
-  "STATUS_URL": "127.0.0.1:8180"
+  "TELEMETRY_URL": "127.0.0.1:8180"
 }
 ```
 
@@ -673,11 +697,11 @@ Has type `String`. Can be configured via environment variable `TORII_P2P_ADDR`
 "127.0.0.1:1337"
 ```
 
-### `torii.status_url`
+### `torii.telemetry_url`
 
-Torii URL for reporting internal status for administration.
+Torii URL for reporting internal status and metrics for administration.
 
-Has type `String`. Can be configured via environment variable `TORII_STATUS_URL`
+Has type `String`. Can be configured via environment variable `TORII_TELEMETRY_URL`
 
 ```json
 "127.0.0.1:8180"

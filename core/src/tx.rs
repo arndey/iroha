@@ -7,7 +7,6 @@ use std::{cmp::min, time::Duration};
 use eyre::{Result, WrapErr};
 use iroha_crypto::SignaturesOf;
 pub use iroha_data_model::prelude::*;
-use iroha_macro::Io;
 use iroha_version::{declare_versioned_with_scale, version_with_scale};
 use parity_scale_codec::{Decode, Encode};
 
@@ -15,7 +14,7 @@ use crate::{
     prelude::*,
     smartcontracts::{
         permissions::{self, IsInstructionAllowedBoxed, IsQueryAllowedBoxed},
-        Evaluate, Execute,
+        Evaluate, Execute, FindError,
     },
     wsv::WorldTrait,
 };
@@ -54,21 +53,28 @@ impl VersionedAcceptedTransaction {
         AcceptedTransaction::from_transaction(transaction, max_instruction_number).map(Into::into)
     }
 
-    /// Checks if this transaction is waiting longer than specified in `transaction_time_to_live` from `QueueConfiguration` or `time_to_live_ms` of this transaction.
-    /// Meaning that the transaction will be expired as soon as the lesser of the specified TTLs was reached.
+    /// Checks if this transaction is waiting longer than specified in
+    /// `transaction_time_to_live` from `QueueConfiguration` or
+    /// `time_to_live_ms` of this transaction.  Meaning that the
+    /// transaction will be expired as soon as the lesser of the
+    /// specified TTLs was reached.
     pub fn is_expired(&self, transaction_time_to_live: Duration) -> bool {
         self.as_v1().is_expired(transaction_time_to_live)
     }
 
-    /// If `true`, this transaction is regarded to have been tampered to have a future timestamp.
+    /// If `true`, this transaction is regarded as one that has been
+    /// tampered with. This is common practice in e.g. `https`, where
+    /// setting your system clock back in time will prevent you from
+    /// accessing any of the https web-sites.
     pub fn is_in_future(&self, threshold: Duration) -> bool {
         self.as_v1().is_in_future(threshold)
     }
 
-    /// Move transaction lifecycle forward by checking an ability to apply instructions to the
-    /// `WorldStateView<W>`.
+    /// Move transaction lifecycle forward by checking an ability to
+    /// apply instructions to the `WorldStateView<W>`.
+    ///
     /// # Errors
-    /// Fails if validation of instruction fails due to permissions or other kinds of errors.
+    /// Fails if validation of instruction fails (e.g. permissions mismatch).
     pub fn validate<W: WorldTrait>(
         self,
         wsv: &WorldStateView<W>,
@@ -82,22 +88,17 @@ impl VersionedAcceptedTransaction {
             .map_err(Into::into)
     }
 
-    /// Checks that the signatures of this transaction satisfy the signature condition specified in the account.
+    /// Checks that the signatures of this transaction satisfy the
+    /// signature condition specified in the account.
+    ///
     /// # Errors
-    /// Can fail if signature conditionon account fails or if account is not found
+    /// - if signature conditionon fails
+    /// - if account is not found
     pub fn check_signature_condition<W: WorldTrait>(
         &self,
         wsv: &WorldStateView<W>,
     ) -> Result<bool> {
         self.as_v1().check_signature_condition(wsv)
-    }
-
-    /// Rejects transaction with the `rejection_reason`.
-    pub fn reject(
-        self,
-        rejection_reason: TransactionRejectionReason,
-    ) -> VersionedRejectedTransaction {
-        self.into_v1().reject(rejection_reason).into()
     }
 }
 
@@ -112,7 +113,7 @@ impl Txn for VersionedAcceptedTransaction {
 
 /// `AcceptedTransaction` represents a transaction accepted by iroha peer.
 #[version_with_scale(n = 1, versioned = "VersionedAcceptedTransaction")]
-#[derive(Clone, Debug, Io, Encode, Decode)]
+#[derive(Debug, Clone, Decode, Encode)]
 #[non_exhaustive]
 pub struct AcceptedTransaction {
     /// Payload of this transaction.
@@ -142,8 +143,11 @@ impl AcceptedTransaction {
         })
     }
 
-    /// Checks if this transaction is waiting longer than specified in `transaction_time_to_live` from `QueueConfiguration` or `time_to_live_ms` of this transaction.
-    /// Meaning that the transaction will be expired as soon as the lesser of the specified TTLs was reached.
+    /// Checks if this transaction is waiting longer than specified in
+    /// `transaction_time_to_live` from `QueueConfiguration` or
+    /// `time_to_live_ms` of this transaction.  Meaning that the
+    /// transaction will be expired as soon as the lesser of the
+    /// specified TTLs was reached.
     pub fn is_expired(&self, transaction_time_to_live: Duration) -> bool {
         let tx_timestamp = Duration::from_millis(self.payload.creation_time);
         current_time().saturating_sub(tx_timestamp)
@@ -153,7 +157,8 @@ impl AcceptedTransaction {
             )
     }
 
-    /// If `true`, this transaction is regarded to have been tampered to have a future timestamp.
+    /// If `true`, this transaction is regarded to have been tampered
+    /// to have a future timestamp.
     pub fn is_in_future(&self, threshold: Duration) -> bool {
         let tx_timestamp = Duration::from_millis(self.payload.creation_time);
         tx_timestamp.saturating_sub(current_time()) > threshold
@@ -170,7 +175,7 @@ impl AcceptedTransaction {
     ) -> Result<(), TransactionRejectionReason> {
         let wsv_temp = wsv.clone();
         let account_id = self.payload.account_id.clone();
-        if !is_genesis && account_id == <Account as Identifiable>::Id::genesis_account() {
+        if !is_genesis && account_id == <Account as Identifiable>::Id::genesis() {
             return Err(TransactionRejectionReason::UnexpectedGenesisAccountSignature);
         }
 
@@ -204,11 +209,10 @@ impl AcceptedTransaction {
             if !is_genesis {
                 #[cfg(feature = "roles")]
                 {
-                    let instructions = permissions::unpack_if_role_grant(
-                            instruction.clone(),
-                            wsv,
-                        )
-                        .expect("Unreachable as evalutions should have been checked previously by instruction executions.");
+                    let instructions = permissions::unpack_if_role_grant(instruction.clone(), wsv)
+                        .expect(
+                            "Infallible. Evaluations have been checked by instruction execution.",
+                        );
                     for isi in &instructions {
                         is_instruction_allowed
                             .check(&account_id, isi, wsv)
@@ -274,7 +278,9 @@ impl AcceptedTransaction {
             account
                 .check_signature_condition(&self.signatures)
                 .evaluate(wsv, &Context::new())
+                .map_err(|_err| FindError::Account(account_id.clone()))
         })?
+        .wrap_err("Failed to find the account")
     }
 
     /// Rejects transaction with the `rejection_reason`.
@@ -397,7 +403,7 @@ mod tests {
 
         let tx = Transaction::new(
             vec![],
-            AccountId::new(GENESIS_ACCOUNT_NAME, GENESIS_DOMAIN_NAME),
+            AccountId::test(GENESIS_ACCOUNT_NAME, GENESIS_DOMAIN_NAME),
             1000,
         );
         let tx_hash = tx.hash();
@@ -431,7 +437,7 @@ mod tests {
         };
         let tx = Transaction::new(
             vec![inst.into(); DEFAULT_MAX_INSTRUCTION_NUMBER as usize + 1],
-            AccountId::new("root", "global"),
+            AccountId::test("root", "global"),
             1000,
         );
         let result: Result<AcceptedTransaction> = AcceptedTransaction::from_transaction(tx, 4096);

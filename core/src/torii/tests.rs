@@ -4,13 +4,16 @@ use std::time::Duration;
 
 use futures::future::FutureExt;
 use iroha_actor::{broker::Broker, Actor};
+use iroha_version::prelude::*;
 use tokio::time;
+use warp::test::WsClient;
 
 use super::*;
 use crate::{
     queue::Queue,
     samples::{get_config, get_trusted_peers},
     smartcontracts::permissions::DenyAll,
+    stream::{Sink, Stream},
     wsv::World,
 };
 
@@ -18,21 +21,22 @@ async fn create_torii() -> (Torii<World>, KeyPair) {
     let mut config = get_config(get_trusted_peers(None), None);
     config.torii.p2p_addr = format!("127.0.0.1:{}", unique_port::get_unique_free_port().unwrap());
     config.torii.api_url = format!("127.0.0.1:{}", unique_port::get_unique_free_port().unwrap());
-    config.torii.status_url = format!("127.0.0.1:{}", unique_port::get_unique_free_port().unwrap());
+    config.torii.telemetry_url =
+        format!("127.0.0.1:{}", unique_port::get_unique_free_port().unwrap());
     let (events, _) = tokio::sync::broadcast::channel(100);
     let wsv = Arc::new(WorldStateView::new(World::with(
         ('a'..'z')
             .map(|name| name.to_string())
-            .map(|name| (name.clone(), Domain::new(&name))),
+            .map(|name| (DomainId::test(&name), Domain::test(&name))),
         vec![],
     )));
     let keys = KeyPair::generate().expect("Failed to generate keys");
     wsv.world.domains.insert(
-        "wonderland".to_owned(),
+        DomainId::test("wonderland"),
         Domain::with_accounts(
             "wonderland",
             std::iter::once(Account::with_signatory(
-                AccountId::new("alice", "wonderland"),
+                AccountId::test("alice", "wonderland"),
                 keys.public_key.clone(),
             )),
         ),
@@ -74,12 +78,11 @@ async fn create_and_start_torii() {
 #[tokio::test(flavor = "multi_thread")]
 async fn torii_pagination() {
     let (torii, keys) = create_torii().await;
-    let state = torii.create_state();
 
     let get_domains = |start, limit| {
         let query: VerifiedQueryRequest = QueryRequest::new(
             QueryBox::FindAllDomains(Default::default()),
-            AccountId::new("alice", "wonderland"),
+            AccountId::test("alice", "wonderland"),
         )
         .sign(keys.clone())
         .expect("Failed to sign query with keys")
@@ -87,7 +90,13 @@ async fn torii_pagination() {
         .expect("Failed to verify");
 
         let pagination = Pagination { start, limit };
-        handle_queries(state.clone(), pagination, query).map(|result| {
+        handle_queries(
+            Arc::clone(&torii.wsv),
+            Arc::clone(&torii.query_validator),
+            pagination,
+            query,
+        )
+        .map(|result| {
             let Scale(query_result) = result.unwrap();
             if let VersionedQueryResult::V1(QueryResult(Value::Vec(domain))) = query_result {
                 domain
@@ -171,27 +180,24 @@ impl AssertReady {
         self
     }
     async fn assert(self) {
-        use iroha_version::scale::EncodeVersioned;
-
         use crate::smartcontracts::Execute;
 
         let (mut torii, keys) = create_torii().await;
         if self.deny_all {
             torii.query_validator = Arc::new(DenyAll.into());
         }
-        let state = torii.create_state();
 
-        let authority = AccountId::new("alice", "wonderland");
+        let authority = AccountId::test("alice", "wonderland");
         for instruction in self.instructions {
             instruction
-                .execute(authority.clone(), &state.wsv)
+                .execute(authority.clone(), &torii.wsv)
                 .expect("Given instructions disorder");
         }
 
-        let post_router = endpoint3(
+        let post_router = endpoint4(
             handle_queries,
             warp::path(uri::QUERY)
-                .and(add_state(Arc::clone(&state)))
+                .and(add_state!(torii.wsv, torii.query_validator))
                 .and(paginate())
                 .and(body::query()),
         );
@@ -215,7 +221,7 @@ impl AssertReady {
 
         let response_body = match response.status() {
             StatusCode::OK => {
-                let response: VersionedQueryResult = response.body().to_vec().try_into().unwrap();
+                let response = VersionedQueryResult::decode_versioned(response.body()).unwrap();
                 let VersionedQueryResult::V1(QueryResult(value)) = response;
                 format!("{:?}", value)
             }
@@ -236,23 +242,23 @@ impl AssertReady {
 const DOMAIN: &str = "desert";
 
 fn register_domain() -> Instruction {
-    Instruction::Register(RegisterBox::new(Domain::new(DOMAIN)))
+    Instruction::Register(RegisterBox::new(Domain::test(DOMAIN)))
 }
 fn register_account(name: &str) -> Instruction {
     Instruction::Register(RegisterBox::new(NewAccount::with_signatory(
-        AccountId::new(name, DOMAIN),
+        AccountId::test(name, DOMAIN),
         KeyPair::generate().unwrap().public_key,
     )))
 }
 fn register_asset_definition(name: &str) -> Instruction {
     Instruction::Register(RegisterBox::new(AssetDefinition::new_quantity(
-        AssetDefinitionId::new(name, DOMAIN),
+        AssetDefinitionId::test(name, DOMAIN),
     )))
 }
 fn mint_asset(quantity: u32, asset: &str, account: &str) -> Instruction {
     Instruction::Mint(MintBox::new(
         Value::U32(quantity),
-        AssetId::from_names(asset, DOMAIN, account, DOMAIN),
+        AssetId::test(asset, DOMAIN, account, DOMAIN),
     ))
 }
 #[tokio::test]
@@ -262,9 +268,9 @@ async fn find_asset() {
         .given(register_account("alice"))
         .given(register_asset_definition("rose"))
         .given(mint_asset(99, "rose", "alice"))
-        .query(QueryBox::FindAssetById(FindAssetById::new(
-            AssetId::from_names("rose", DOMAIN, "alice", DOMAIN),
-        )))
+        .query(QueryBox::FindAssetById(FindAssetById::new(AssetId::test(
+            "rose", DOMAIN, "alice", DOMAIN,
+        ))))
         .status(StatusCode::OK)
         .hint("Quantity")
         .hint("99")
@@ -279,7 +285,7 @@ async fn find_asset_with_no_mint() {
         .given(register_asset_definition("rose"))
     // .given(mint_asset(99, "rose", "alice"))
         .query(QueryBox::FindAssetById(FindAssetById::new(
-            AssetId::from_names("rose", DOMAIN, "alice", DOMAIN),
+            AssetId::test("rose", DOMAIN, "alice", DOMAIN),
         )))
         .status(StatusCode::NOT_FOUND)
         .assert()
@@ -293,7 +299,7 @@ async fn find_asset_with_no_asset_definition() {
     // .given(register_asset_definition("rose"))
     // .given(mint_asset(99, "rose", "alice"))
         .query(QueryBox::FindAssetById(FindAssetById::new(
-            AssetId::from_names("rose", DOMAIN, "alice", DOMAIN),
+            AssetId::test("rose", DOMAIN, "alice", DOMAIN),
         )))
         .status(StatusCode::NOT_FOUND)
         .hint("definition")
@@ -308,7 +314,7 @@ async fn find_asset_with_no_account() {
         .given(register_asset_definition("rose"))
     // .given(mint_asset(99, "rose", "alice"))
         .query(QueryBox::FindAssetById(FindAssetById::new(
-            AssetId::from_names("rose", DOMAIN, "alice", DOMAIN),
+            AssetId::test("rose", DOMAIN, "alice", DOMAIN),
         )))
         .status(StatusCode::NOT_FOUND)
         .hint("account")
@@ -323,7 +329,7 @@ async fn find_asset_with_no_domain() {
     // .given(register_asset_definition("rose"))
     // .given(mint_asset(99, "rose", "alice"))
         .query(QueryBox::FindAssetById(FindAssetById::new(
-            AssetId::from_names("rose", DOMAIN, "alice", DOMAIN),
+            AssetId::test("rose", DOMAIN, "alice", DOMAIN),
         )))
         .status(StatusCode::NOT_FOUND)
         .hint("domain")
@@ -348,7 +354,7 @@ async fn find_account() {
         .given(register_domain())
         .given(register_account("alice"))
         .query(QueryBox::FindAccountById(FindAccountById::new(
-            AccountId::new("alice", DOMAIN),
+            AccountId::test("alice", DOMAIN),
         )))
         .status(StatusCode::OK)
         .assert()
@@ -360,7 +366,7 @@ async fn find_account_with_no_account() {
         .given(register_domain())
     // .given(register_account("alice"))
         .query(QueryBox::FindAccountById(FindAccountById::new(
-            AccountId::new("alice", DOMAIN),
+            AccountId::test("alice", DOMAIN),
         )))
         .status(StatusCode::NOT_FOUND)
         .assert()
@@ -372,7 +378,7 @@ async fn find_account_with_no_domain() {
     // .given(register_domain())
     // .given(register_account("alice"))
         .query(QueryBox::FindAccountById(FindAccountById::new(
-            AccountId::new("alice", DOMAIN),
+            AccountId::test("alice", DOMAIN),
         )))
         .status(StatusCode::NOT_FOUND)
         .hint("domain")
@@ -383,8 +389,8 @@ async fn find_account_with_no_domain() {
 async fn find_domain() {
     AssertSet::new()
         .given(register_domain())
-        .query(QueryBox::FindDomainByName(FindDomainByName::new(
-            DOMAIN.to_string(),
+        .query(QueryBox::FindDomainById(FindDomainById::new(
+            DomainId::test(DOMAIN),
         )))
         .status(StatusCode::OK)
         .assert()
@@ -394,7 +400,7 @@ async fn find_domain() {
 async fn find_domain_with_no_domain() {
     AssertSet::new()
     // .given(register_domain())
-        .query(QueryBox::FindDomainByName(FindDomainByName::new(
+        .query(QueryBox::FindDomainById(FindDomainById::new(
             DOMAIN.to_string(),
         )))
         .status(StatusCode::NOT_FOUND)
@@ -402,14 +408,14 @@ async fn find_domain_with_no_domain() {
         .await
 }
 fn query() -> QueryBox {
-    QueryBox::FindAccountById(FindAccountById::new(AccountId::new("alice", DOMAIN)))
+    QueryBox::FindAccountById(FindAccountById::new(AccountId::test("alice", DOMAIN)))
 }
 #[tokio::test]
 async fn query_with_wrong_signatory() {
     AssertSet::new()
         .given(register_domain())
         .given(register_account("alice"))
-        .account(AccountId::new("alice", DOMAIN))
+        .account(AccountId::test("alice", DOMAIN))
     // .deny_all()
         .query(query())
         .status(StatusCode::UNAUTHORIZED)
@@ -475,4 +481,62 @@ async fn query_with_no_find() {
         .status(StatusCode::NOT_FOUND)
         .assert()
         .await
+}
+#[tokio::test]
+async fn blocks_stream() {
+    const BLOCK_COUNT: usize = 4;
+
+    let (torii, _) = create_torii().await;
+    let router = torii.create_api_router();
+
+    // Initialize blockchain
+    let mut block = ValidBlock::new_dummy().commit();
+    for i in 1..=BLOCK_COUNT {
+        block.header.height = i as u64;
+        let block: VersionedCommittedBlock = block.clone().into();
+        torii.wsv.apply(block).await.unwrap();
+    }
+
+    let mut client = warp::test::ws()
+        .path("/block/stream")
+        .handshake(router)
+        .await
+        .unwrap();
+
+    <WsClient as Sink<_>>::send(
+        &mut client,
+        VersionedBlockSubscriberMessage::from(BlockSubscriberMessage::SubscriptionRequest(2)),
+    )
+    .await
+    .unwrap();
+
+    let subscription_accepted_message: VersionedBlockPublisherMessage =
+        <WsClient as Stream<_>>::recv(&mut client).await.unwrap();
+    assert!(matches!(
+        subscription_accepted_message.into_v1(),
+        BlockPublisherMessage::SubscriptionAccepted
+    ));
+
+    for i in 2..=BLOCK_COUNT {
+        let block_message: VersionedBlockPublisherMessage =
+            <WsClient as Stream<_>>::recv(&mut client).await.unwrap();
+        let block: VersionedCommittedBlock = block_message.into_v1().try_into().unwrap();
+        assert_eq!(block.header().height, i as u64);
+
+        <WsClient as Sink<_>>::send(
+            &mut client,
+            VersionedBlockSubscriberMessage::from(BlockSubscriberMessage::BlockReceived),
+        )
+        .await
+        .unwrap();
+    }
+
+    block.header.height = BLOCK_COUNT as u64 + 1;
+    let block: VersionedCommittedBlock = block.clone().into();
+    torii.wsv.apply(block).await.unwrap();
+
+    let block_message: VersionedBlockPublisherMessage =
+        <WsClient as Stream<_>>::recv(&mut client).await.unwrap();
+    let block: VersionedCommittedBlock = block_message.into_v1().try_into().unwrap();
+    assert_eq!(block.header().height, BLOCK_COUNT as u64 + 1);
 }

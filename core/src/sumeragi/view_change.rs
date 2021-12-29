@@ -5,23 +5,23 @@ use std::{collections::HashSet, fmt::Display};
 
 use eyre::{Context, Result};
 use iroha_crypto::{HashOf, KeyPair, PublicKey, SignatureOf, SignaturesOf};
-use iroha_data_model::{prelude::PeerId, transaction::VersionedTransaction};
+use iroha_data_model::prelude::PeerId;
 use iroha_macro::*;
 use iroha_schema::IntoSchema;
 use parity_scale_codec::{Decode, Encode};
 
-use super::message::TransactionReceipt;
 use crate::block::{EmptyChainHash, VersionedCommittedBlock, VersionedValidBlock};
 
 /// The proof of a view change. It needs to be signed by f+1 peers for proof to be valid and view change to happen.
-#[derive(Clone, Debug, Io, Encode, Decode, IntoSchema)]
+#[derive(Debug, Clone, Decode, Encode, IntoSchema)]
 pub struct Proof {
     payload: ProofPayload,
     signatures: SignaturesOf<Self>,
 }
 
 impl Proof {
-    fn hash(&self) -> HashOf<Self> {
+    /// Hash of this proof.
+    pub fn hash(&self) -> HashOf<Self> {
         HashOf::new(&self.payload).transmute()
     }
 
@@ -56,15 +56,12 @@ impl Proof {
     /// # Errors
     /// Can fail due to signing
     pub fn block_creation_timeout(
-        transaction_receipt: TransactionReceipt,
         previous_proof: HashOf<Self>,
         latest_block: HashOf<VersionedCommittedBlock>,
         key_pair: KeyPair,
     ) -> Result<Self> {
         let payload = ProofPayload {
-            reason: Reason::from(BlockCreationTimeout {
-                transaction_receipt,
-            }),
+            reason: Reason::from(BlockCreationTimeout),
             previous_proof,
             latest_block,
         };
@@ -75,15 +72,12 @@ impl Proof {
     /// # Errors
     /// Can fail due to signing
     pub fn no_transaction_receipt_received(
-        transaction_hash: HashOf<VersionedTransaction>,
         previous_proof: HashOf<Self>,
         latest_block: HashOf<VersionedCommittedBlock>,
         key_pair: KeyPair,
     ) -> Result<Self> {
         let payload = ProofPayload {
-            reason: Reason::NoTransactionReceiptReceived(NoTransactionReceiptReceived {
-                transaction_hash,
-            }),
+            reason: Reason::NoTransactionReceiptReceived(NoTransactionReceiptReceived),
             previous_proof,
             latest_block,
         };
@@ -101,8 +95,15 @@ impl Proof {
         Ok(self)
     }
 
+    /// Adds verified signatures of `other` to self.
+    pub fn merge_signatures(&mut self, other: &Proof) {
+        self.signatures.merge(SignaturesOf::from_iter_unchecked(
+            other.signatures.verified_by_hash(self.hash()).cloned(),
+        ));
+    }
+
     /// Verify if the proof is valid, given the peers in `topology`.
-    pub fn verify(&self, peers: &HashSet<PeerId>, max_faults: u32) -> bool {
+    pub fn verify(&self, peers: &HashSet<PeerId>, max_faults: usize) -> bool {
         let peer_public_keys: HashSet<PublicKey> = peers
             .iter()
             .map(|peer_id| peer_id.public_key.clone())
@@ -115,7 +116,7 @@ impl Proof {
         // See Whitepaper for the information on this limit.
         #[allow(clippy::int_plus_one)]
         {
-            n_signatures >= max_faults as usize + 1
+            n_signatures >= max_faults + 1
         }
     }
 
@@ -141,18 +142,18 @@ impl Proof {
 }
 
 /// Payload of [`Proof`]
-#[derive(Clone, Debug, Io, Encode, Decode, IntoSchema)]
+#[derive(Debug, Clone, Decode, Encode, IntoSchema)]
 pub struct ProofPayload {
-    ///
+    /// Hash os the previous view change proof.
     previous_proof: HashOf<Proof>,
     /// Latest committed block hash.
     latest_block: HashOf<VersionedCommittedBlock>,
-    ///
+    /// Reason for a view change.
     reason: Reason,
 }
 
 /// Reason for a view change.
-#[derive(Clone, Debug, Io, Encode, Decode, FromVariant, IntoSchema)]
+#[derive(Debug, Clone, Decode, Encode, FromVariant, IntoSchema)]
 pub enum Reason {
     /// Proxy tail have not committed a block in time.
     CommitTimeout(CommitTimeout),
@@ -173,28 +174,22 @@ impl Display for Reason {
 }
 
 /// Block `CommitTimeout` reason for a view change.
-#[derive(Clone, Debug, Io, Encode, Decode, Copy, IntoSchema)]
+#[derive(Debug, Clone, Copy, Decode, Encode, IntoSchema)]
 pub struct CommitTimeout {
     /// The hash of the block in discussion in this round.
     pub hash: HashOf<VersionedValidBlock>,
 }
 
 /// `NoTransactionReceiptReceived` (from leader) reason for a view change.
-#[derive(Clone, Debug, Io, Encode, Decode, Copy, IntoSchema)]
-pub struct NoTransactionReceiptReceived {
-    /// The hash of the transaction for which there was no `TransactionReceipt`.
-    pub transaction_hash: HashOf<VersionedTransaction>,
-}
+#[derive(Clone, Debug, Encode, Decode, Copy, IntoSchema)]
+pub struct NoTransactionReceiptReceived;
 
 /// `BlockCreationTimeout` reason for a view change.
-#[derive(Clone, Debug, Io, Encode, Decode, IntoSchema)]
-pub struct BlockCreationTimeout {
-    /// A proof of the leader receiving and accepting a transaction.
-    pub transaction_receipt: TransactionReceipt,
-}
+#[derive(Copy, Clone, Debug, Encode, Decode, IntoSchema)]
+pub struct BlockCreationTimeout;
 
 /// A chain of view change proofs. Stored in block for roles to be known at that point in history.
-#[derive(Clone, Debug, Io, Encode, Decode, Default, IntoSchema)]
+#[derive(Debug, Clone, Default, Decode, Encode, IntoSchema)]
 pub struct ProofChain {
     proofs: Vec<Proof>,
 }
@@ -209,7 +204,7 @@ impl ProofChain {
     pub fn verify_with_state(
         &self,
         peers: &HashSet<PeerId>,
-        max_faults: u32,
+        max_faults: usize,
         latest_block: &HashOf<VersionedCommittedBlock>,
     ) -> bool {
         let mut previous_proof = EmptyChainHash::default().into();

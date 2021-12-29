@@ -75,7 +75,7 @@ pub fn version_with_json(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// declare_versioned!(VersionedMessage 1..2, Debug, Clone, iroha_macro::FromVariant);
 ///
-/// #[version(n = 1, versioned = "VersionedMessage", derive = "Debug, Clone")]
+/// #[version(n = 1, versioned = "VersionedMessage")]
 /// #[derive(Debug, Clone, Decode, Encode, Serialize, Deserialize)]
 /// pub struct Message1;
 ///
@@ -136,6 +136,11 @@ fn impl_version(args: Vec<NestedMeta>, item: TokenStream) -> TokenStream2 {
         })
         .collect();
 
+    for name in args_map.keys() {
+        if ![VERSION_NUMBER_ARG_NAME, VERSIONED_STRUCT_ARG_NAME].contains(&name.as_str()) {
+            abort!(name.span(), "Unknown field");
+        }
+    }
     let version_number = args_map
         .get(VERSION_NUMBER_ARG_NAME)
         .expect_or_abort(&format!(
@@ -251,7 +256,6 @@ fn impl_decode_versioned(enum_name: &Ident) -> proc_macro2::TokenStream {
 
         impl iroha_version::scale::EncodeVersioned for #enum_name {
             fn encode_versioned(&self) -> iroha_version::error::Result<Vec<u8>> {
-                use iroha_version::{error::Error, UnsupportedVersion, RawVersioned};
                 use parity_scale_codec::Encode;
 
                 Ok(self.encode())
@@ -289,9 +293,6 @@ fn impl_json(enum_name: &Ident, version_field_name: &str) -> proc_macro2::TokenS
 
         impl iroha_version::json::SerializeVersioned for #enum_name {
             fn to_versioned_json_str(&self) -> iroha_version::error::Result<String> {
-                use iroha_version::RawVersioned;
-                use iroha_version::error::Error;
-
                 Ok(serde_json::to_string(self)?)
             }
         }

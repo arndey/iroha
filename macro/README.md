@@ -7,7 +7,6 @@ This crate contains macros and attributes for Iroha projects.
 
 ### Features
 
-* `Io` trait and derive macros for Iroha entities de\serialization
 * `log` attribute for debugging functions inputs and output
 
 ## Usage
@@ -37,7 +36,7 @@ iroha_derive = { git = "https://github.com/hyperledger/iroha/", branch="iroha2-d
 ### Code example
 
 ```rust
-#[derive(Clone, Debug, Io, Encode, Decode)]
+#[derive(Clone, Debug, Encode, Decode)]
 pub struct Test [
 ...
 ```
@@ -47,12 +46,7 @@ pub struct Test [
 That's great!
 Check out [this document](https://github.com/hyperledger/iroha/blob/iroha2-dev/CONTRIBUTING.md)
 
-## Need help?
-
-* Join [Telegram chat](https://t.me/hyperledgeriroha) or [Hyperledger RocketChat](https://chat.hyperledger.org/channel/iroha) where the maintainers, contributors and fellow users are ready to help you.
-You can also discuss your concerns and proposals and simply chat about Iroha there or in Gitter [![Join the chat at https://gitter.im/hyperledger-iroha/Lobby](https://badges.gitter.im/hyperledger-iroha/Lobby.svg)](https://gitter.im/hyperledger-iroha/Lobby)
-* Submit issues and improvement suggestions via [Hyperledger Jira](https://jira.hyperledger.org/secure/CreateIssue!default.jspa)
-* Subscribe to our [mailing list](https://lists.hyperledger.org/g/iroha) to receive the latest and most important news and spread your word within Iroha community
+## [Need help?](https://github.com/hyperledger/iroha/blob/iroha2-dev/CONTRIBUTING.md#contact)
 
 ## License
 

@@ -1377,19 +1377,18 @@ checksum = "b33c9a5c599d67d051c4dc25eb1b6b4ef715d1763c20c85c688717a1734f204e"
 
 [[package]]
 name = "iroha"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "color-eyre",
  "iroha_core",
  "iroha_logger",
  "iroha_permissions_validators",
- "structopt",
  "tokio",
 ]
 
 [[package]]
 name = "iroha_actor"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -1401,22 +1400,23 @@ dependencies = [
  "petgraph",
  "thiserror",
  "tokio",
- "trybuild",
 ]
 
 [[package]]
 name = "iroha_actor_derive"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
+ "iroha_actor",
  "proc-macro-error",
  "proc-macro2",
  "quote",
  "syn",
+ "trybuild",
 ]
 
 [[package]]
 name = "iroha_client"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "attohttpc",
  "color-eyre",
@@ -1429,6 +1429,7 @@ dependencies = [
  "iroha_data_model",
  "iroha_logger",
  "iroha_permissions_validators",
+ "iroha_telemetry",
  "iroha_version",
  "rand 0.8.4",
  "serde",
@@ -1441,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_client_cli"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "color-eyre",
  "dialoguer",
@@ -1455,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_config"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "crossbeam",
  "iroha_config_derive",
@@ -1466,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_config_derive"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -1476,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_core"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1504,7 +1505,6 @@ dependencies = [
  "rand 0.8.4",
  "serde",
  "serde_json",
- "structopt",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1515,14 +1515,13 @@ dependencies = [
 
 [[package]]
 name = "iroha_crypto"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "derive_more",
  "eyre",
  "hex",
  "hex-literal",
  "iroha_schema",
- "openssl-sys",
  "parity-scale-codec",
  "serde",
  "serde_json",
@@ -1531,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_crypto_cli"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "clap",
  "color-eyre",
@@ -1542,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_data_model"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "dashmap",
  "eyre",
@@ -1555,7 +1554,6 @@ dependencies = [
  "iroha_schema",
  "iroha_version",
  "parity-scale-codec",
- "prometheus",
  "serde",
  "serde_json",
  "test_network",
@@ -1567,10 +1565,9 @@ dependencies = [
 
 [[package]]
 name = "iroha_derive"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "iroha_macro",
- "parity-scale-codec",
  "proc-macro2",
  "quote",
  "syn",
@@ -1579,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_docs"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "color-eyre",
  "iroha_config",
@@ -1589,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_futures"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "iroha_futures_derive",
  "iroha_logger",
@@ -1602,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_futures_derive"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -1612,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_logger"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "color-eyre",
  "iroha_config",
@@ -1629,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_macro"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "eyre",
  "iroha_derive",
@@ -1637,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_p2p"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "aead",
  "async-stream",
@@ -1658,16 +1655,17 @@ dependencies = [
 
 [[package]]
 name = "iroha_permissions_validators"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "iroha_core",
  "iroha_data_model",
  "iroha_macro",
+ "once_cell",
 ]
 
 [[package]]
 name = "iroha_schema"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "fixnum",
  "iroha_schema_derive",
@@ -1677,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_schema_bin"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "eyre",
  "iroha_core",
@@ -1688,20 +1686,22 @@ dependencies = [
 
 [[package]]
 name = "iroha_schema_derive"
-version = "0.0.0"
+version = "2.0.0-pre.1"
 dependencies = [
+ "iroha_schema",
  "proc-macro2",
  "quote",
  "syn",
+ "trybuild",
 ]
 
 [[package]]
 name = "iroha_substrate"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 
 [[package]]
 name = "iroha_telemetry"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1711,6 +1711,8 @@ dependencies = [
  "iroha_config",
  "iroha_futures",
  "iroha_logger",
+ "iroha_telemetry_derive",
+ "prometheus",
  "serde",
  "serde_json",
  "streaming-stats",
@@ -1722,8 +1724,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iroha_telemetry_derive"
+version = "2.0.0-pre.1"
+dependencies = [
+ "iroha_core",
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "trybuild",
+]
+
+[[package]]
 name = "iroha_version"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "eyre",
  "iroha_macro",
@@ -1737,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "iroha_version_derive"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "iroha_macro",
  "iroha_version",
@@ -2059,15 +2073,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28988d872ab76095a6e6ac88d99b54fd267702734fd7ffe610ca27f533ddb95a"
 
 [[package]]
-name = "openssl-src"
-version = "300.0.2+3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14a760a11390b1a5daf72074d4f6ff1a6e772534ae191f999f57e9ee8146d1fb"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "openssl-sys"
 version = "0.9.71"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2076,7 +2081,6 @@ dependencies = [
  "autocfg 1.0.1",
  "cc",
  "libc",
- "openssl-src",
  "pkg-config",
  "vcpkg",
 ]
@@ -2293,9 +2297,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.32"
+version = "1.0.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba508cc11742c0dc5c1659771673afbab7a0efab23aa17e854cbab0837ed0b43"
+checksum = "fb37d2df5df740e582f28f8560cf425f52bb267d872fe58358eadb554909f07a"
 dependencies = [
  "unicode-xid",
 ]
@@ -2971,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "test_network"
-version = "0.1.0"
+version = "2.0.0-pre.1"
 dependencies = [
  "async-trait",
  "eyre",

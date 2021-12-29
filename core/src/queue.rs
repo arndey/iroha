@@ -7,6 +7,7 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use eyre::{Report, Result};
 use iroha_crypto::HashOf;
 use iroha_data_model::transaction::prelude::*;
+use rand::seq::IteratorRandom;
 use thiserror::Error;
 
 pub use self::config::Configuration;
@@ -84,6 +85,19 @@ impl Queue {
             .filter(|e| self.is_pending(e.value(), wsv))
             .map(|e| e.value().clone())
             .collect()
+    }
+
+    /// Returns `n` randomly selected transaction from the queue.
+    pub fn n_random_transactions<W: WorldTrait>(
+        &self,
+        wsv: &WorldStateView<W>,
+        n: usize,
+    ) -> Vec<VersionedAcceptedTransaction> {
+        self.txs
+            .iter()
+            .filter(|e| self.is_pending(e.value(), wsv))
+            .map(|e| e.value().clone())
+            .choose_multiple(&mut rand::thread_rng(), n)
     }
 
     fn check_tx<W: WorldTrait>(
@@ -289,7 +303,7 @@ mod tests {
             .collect();
         let tx = Transaction::new(
             vec![FailBox { message }.into()],
-            <Account as Identifiable>::Id::new(account, domain),
+            <Account as Identifiable>::Id::test(account, domain),
             proposed_ttl_ms,
         )
         .sign(&key)
@@ -300,12 +314,12 @@ mod tests {
 
     pub fn world_with_test_domains(public_key: PublicKey) -> World {
         let domains = DomainsMap::new();
-        let mut domain = Domain::new("wonderland");
-        let account_id = AccountId::new("alice", "wonderland");
+        let mut domain = Domain::test("wonderland");
+        let account_id = AccountId::test("alice", "wonderland");
         let mut account = Account::new(account_id.clone());
         account.signatories.push(public_key);
         domain.accounts.insert(account_id, account);
-        domains.insert("wonderland".to_string(), domain);
+        domains.insert(DomainId::test("wonderland"), domain);
         World::with(domains, PeersIds::new())
     }
 
@@ -364,10 +378,10 @@ mod tests {
         let wsv = WorldStateView::new(world_with_test_domains(
             KeyPair::generate().unwrap().public_key,
         ));
-        let mut domain = wsv.domain_mut("wonderland").unwrap();
+        let mut domain = wsv.domain_mut(&DomainId::test("wonderland")).unwrap();
         domain
             .accounts
-            .get_mut(&<Account as Identifiable>::Id::new("alice", "wonderland"))
+            .get_mut(&<Account as Identifiable>::Id::test("alice", "wonderland"))
             .unwrap()
             .signature_check_condition = SignatureCheckCondition(0_u32.into());
         drop(domain);
@@ -388,7 +402,7 @@ mod tests {
         });
         let tx = Transaction::new(
             Vec::new(),
-            <Account as Identifiable>::Id::new("alice", "wonderland"),
+            <Account as Identifiable>::Id::test("alice", "wonderland"),
             100_000,
         );
         let get_tx = || {

@@ -189,7 +189,7 @@ impl<S: SumeragiTrait + Debug, W: WorldTrait> BlockSynchronizer<S, W> {
                         .map(SignatureOf::transmute_ref),
                 )
                 .len()
-                >= network_topology.min_votes_for_commit() as usize
+                >= network_topology.min_votes_for_commit()
         {
             self.state = State::InProgress(remaining_blocks.to_vec(), peer_id);
             self.sumeragi
@@ -244,7 +244,7 @@ pub mod message {
     }
 
     /// Get blocks after some block
-    #[derive(Io, Decode, Encode, Debug, Clone)]
+    #[derive(Debug, Clone, Decode, Encode)]
     pub struct GetBlocksAfter {
         /// Block hash
         pub hash: HashOf<VersionedCommittedBlock>,
@@ -253,14 +253,14 @@ pub mod message {
     }
 
     impl GetBlocksAfter {
-        /// Default constructor
+        /// Construct [`GetBlocksAfter`].
         pub const fn new(hash: HashOf<VersionedCommittedBlock>, peer_id: PeerId) -> Self {
             Self { hash, peer_id }
         }
     }
 
     /// Message variant to share blocks to peer
-    #[derive(Io, Decode, Encode, Debug, Clone)]
+    #[derive(Debug, Clone, Decode, Encode)]
     pub struct ShareBlocks {
         /// Blocks
         pub blocks: Vec<VersionedCommittedBlock>,
@@ -269,7 +269,7 @@ pub mod message {
     }
 
     impl ShareBlocks {
-        /// Default constructor
+        /// Construct [`ShareBlocks`].
         pub const fn new(blocks: Vec<VersionedCommittedBlock>, peer_id: PeerId) -> Self {
             Self { blocks, peer_id }
         }
@@ -277,7 +277,7 @@ pub mod message {
 
     /// Message's variants that are used by peers to communicate in the process of consensus.
     #[version_with_scale(n = 1, versioned = "VersionedMessage")]
-    #[derive(Io, Decode, Encode, Debug, Clone, FromVariant, iroha_actor::Message)]
+    #[derive(Debug, Clone, Decode, Encode, FromVariant, iroha_actor::Message)]
     pub enum Message {
         /// Request for blocks after the block with `Hash` for the peer with `PeerId`.
         GetBlocksAfter(GetBlocksAfter),
@@ -302,7 +302,12 @@ pub mod message {
                         return;
                     }
 
-                    let blocks = block_sync.wsv.blocks_after(*hash, block_sync.batch_size);
+                    let blocks: Vec<_> = block_sync
+                        .wsv
+                        .blocks_after_hash(*hash)
+                        .take(block_sync.batch_size as usize)
+                        .collect();
+
                     if blocks.is_empty() {
                         warn!(%hash, "Block hash not found");
                     } else {
@@ -344,7 +349,7 @@ pub mod config {
     const DEFAULT_MAILBOX_SIZE: usize = 100;
 
     /// Configuration for `BlockSynchronizer`.
-    #[derive(Copy, Clone, Deserialize, Serialize, Debug, Configurable, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Configurable)]
     #[serde(rename_all = "UPPERCASE")]
     #[serde(default)]
     #[config(env_prefix = "BLOCK_SYNC_")]

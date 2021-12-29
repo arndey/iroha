@@ -1,8 +1,9 @@
 //! This module contains [`Domain`] structure and related implementations and trait implementations.
 use std::collections::btree_map::Entry;
 
-use eyre::{eyre, Result};
+use eyre::Result;
 use iroha_data_model::prelude::*;
+use iroha_telemetry::metrics;
 
 use super::super::isi::prelude::*;
 use crate::prelude::*;
@@ -13,63 +14,81 @@ use crate::prelude::*;
 /// - update metadata
 /// - transfer, etc.
 pub mod isi {
+
     use super::*;
 
     impl<W: WorldTrait> Execute<W> for Register<NewAccount> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"register_account")]
         fn execute(
             self,
             _authority: <NewAccount as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
-            let account = self.object;
-            account.validate_len(wsv.config.ident_length_limits)?;
-            let name = account.id.domain_name.clone();
-            match wsv.domain_mut(&name)?.accounts.entry(account.id.clone()) {
+        ) -> Result<Self::Diff, Self::Error> {
+            let account = self.object.clone();
+            account
+                .id
+                .name
+                .validate_len(wsv.config.ident_length_limits)
+                .map_err(Error::Validate)?;
+            let domain_id = account.id.domain_id.clone();
+            match wsv
+                .domain_mut(&domain_id)?
+                .accounts
+                .entry(account.id.clone())
+            {
                 Entry::Occupied(_) => {
-                    return Err(eyre!(
-                        "Domain already contains an account with this Id: {:?}",
-                        &account.id
-                    )
-                    .into())
+                    return Err(Error::Repetition(
+                        InstructionType::Register,
+                        IdBox::AccountId(account.id),
+                    ))
                 }
                 Entry::Vacant(entry) => {
                     let _ = entry.insert(account.into());
                 }
             }
-            Ok(())
+            Ok(self.into())
         }
     }
 
     impl<W: WorldTrait> Execute<W> for Unregister<Account> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"unregister_account")]
         fn execute(
             self,
             _authority: <Account as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
-            let account_id = self.object_id;
-            wsv.domain_mut(&account_id.domain_name)?
+        ) -> Result<Self::Diff, Self::Error> {
+            let account_id = self.object_id.clone();
+            wsv.domain_mut(&account_id.domain_id)?
                 .accounts
                 .remove(&account_id);
-            Ok(())
+            Ok(self.into())
         }
     }
 
     impl<W: WorldTrait> Execute<W> for Register<AssetDefinition> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"register_asset_def")]
         fn execute(
             self,
             authority: <Account as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
-            let asset_definition = self.object;
-            asset_definition.validate_len(wsv.config.ident_length_limits)?;
-            let name = asset_definition.id.domain_name.clone();
-            let mut domain = wsv.domain_mut(&name)?;
+        ) -> Result<Self::Diff, Self::Error> {
+            let asset_definition = self.object.clone();
+            asset_definition
+                .id
+                .name
+                .validate_len(wsv.config.ident_length_limits)
+                .map_err(Error::Validate)?;
+            let domain_id = asset_definition.id.domain_id.clone();
+            let mut domain = wsv.domain_mut(&domain_id)?;
             match domain.asset_definitions.entry(asset_definition.id.clone()) {
                 Entry::Vacant(entry) => {
                     let _ = entry.insert(AssetDefinitionEntry {
@@ -78,27 +97,28 @@ pub mod isi {
                     });
                 }
                 Entry::Occupied(entry) => {
-                    return Err(eyre!(
-                        "Asset definition already exists and was registered by {}",
-                        entry.get().registered_by
-                    )
-                    .into())
+                    return Err(Error::Repetition(
+                        InstructionType::Register,
+                        IdBox::AccountId(entry.get().registered_by.clone()),
+                    ))
                 }
             }
-            Ok(())
+            Ok(self.into())
         }
     }
 
     impl<W: WorldTrait> Execute<W> for Unregister<AssetDefinition> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"unregister_asset_def")]
         fn execute(
             self,
             _authority: <Account as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
-            let asset_definition_id = self.object_id;
-            wsv.domain_mut(&asset_definition_id.domain_name)?
+        ) -> Result<Self::Diff, Self::Error> {
+            let asset_definition_id = self.object_id.clone();
+            wsv.domain_mut(&asset_definition_id.domain_id)?
                 .asset_definitions
                 .remove(&asset_definition_id);
             for mut domain in wsv.domains().iter_mut() {
@@ -114,18 +134,20 @@ pub mod isi {
                     }
                 }
             }
-            Ok(())
+            Ok(self.into())
         }
     }
 
-    impl<W: WorldTrait> Execute<W> for SetKeyValue<AssetDefinition, String, Value> {
+    impl<W: WorldTrait> Execute<W> for SetKeyValue<AssetDefinition, Name, Value> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"set_key_value_asset_def")]
         fn execute(
             self,
             _authority: <Account as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
+        ) -> Result<Self::Diff, Self::Error> {
             let metadata_limits = wsv.config.asset_definition_metadata_limits;
             wsv.modify_asset_definition_entry(&self.object_id, |asset_definition_entry| {
                 asset_definition_entry
@@ -134,18 +156,20 @@ pub mod isi {
                     .insert_with_limits(self.key.clone(), self.value.clone(), metadata_limits)?;
                 Ok(())
             })?;
-            Ok(())
+            Ok(self.into())
         }
     }
 
-    impl<W: WorldTrait> Execute<W> for RemoveKeyValue<AssetDefinition, String> {
+    impl<W: WorldTrait> Execute<W> for RemoveKeyValue<AssetDefinition, Name> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"remove_key_value_asset_def")]
         fn execute(
             self,
             _authority: <Account as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
+        ) -> Result<Self::Diff, Self::Error> {
             wsv.modify_asset_definition_entry(&self.object_id, |asset_definition_entry| {
                 asset_definition_entry
                     .definition
@@ -154,41 +178,45 @@ pub mod isi {
                     .ok_or_else(|| FindError::MetadataKey(self.key.clone()))?;
                 Ok(())
             })?;
-            Ok(())
+            Ok(self.into())
         }
     }
 
-    impl<W: WorldTrait> Execute<W> for SetKeyValue<Domain, String, Value> {
+    impl<W: WorldTrait> Execute<W> for SetKeyValue<Domain, Name, Value> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"set_key_value_domain")]
         fn execute(
             self,
             _authority: <Account as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
+        ) -> Result<Self::Diff, Self::Error> {
             let Self {
                 object_id,
                 key,
                 value,
-            } = self;
+            } = self.clone();
             let limits = wsv.config.domain_metadata_limits;
             wsv.modify_domain(&object_id, |domain| {
                 domain.metadata.insert_with_limits(key, value, limits)?;
                 Ok(())
             })?;
-            Ok(())
+            Ok(self.into())
         }
     }
 
-    impl<W: WorldTrait> Execute<W> for RemoveKeyValue<Domain, String> {
+    impl<W: WorldTrait> Execute<W> for RemoveKeyValue<Domain, Name> {
         type Error = Error;
+        type Diff = DataEvent;
 
+        #[metrics(+"remove_key_value_domain")]
         fn execute(
             self,
             _authority: <Account as Identifiable>::Id,
             wsv: &WorldStateView<W>,
-        ) -> Result<(), Error> {
-            let Self { object_id, key } = self;
+        ) -> Result<Self::Diff, Self::Error> {
+            let Self { object_id, key } = self.clone();
             wsv.modify_domain(&object_id, |domain| {
                 domain
                     .metadata
@@ -196,7 +224,7 @@ pub mod isi {
                     .ok_or(FindError::MetadataKey(key))?;
                 Ok(())
             })?;
-            Ok(())
+            Ok(self.into())
         }
     }
 }
@@ -207,10 +235,12 @@ pub mod query {
     use iroha_logger::prelude::*;
 
     use super::*;
+    use crate::smartcontracts::query::Error;
 
     impl<W: WorldTrait> ValidQuery<W> for FindAllDomains {
         #[log]
-        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
+        #[metrics(+"find_all_domains")]
+        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output, Error> {
             Ok(wsv
                 .domains()
                 .iter()
@@ -219,48 +249,56 @@ pub mod query {
         }
     }
 
-    impl<W: WorldTrait> ValidQuery<W> for FindDomainByName {
-        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
-            let name = self
-                .name
+    impl<W: WorldTrait> ValidQuery<W> for FindDomainById {
+        #[metrics(+"find_domain_by_id")]
+        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output, Error> {
+            let id = self
+                .id
                 .evaluate(wsv, &Context::default())
-                .wrap_err("Failed to get domain name")?;
-            Ok(wsv.domain(&name)?.clone())
+                .wrap_err("Failed to get domain id")
+                .map_err(Error::Evaluate)?;
+            Ok(wsv.domain(&id)?.clone())
         }
     }
 
     impl<W: WorldTrait> ValidQuery<W> for FindDomainKeyValueByIdAndKey {
         #[log]
-        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
-            let name = self
-                .name
+        #[metrics(+"find_domain_key_value_by_id_and_key")]
+        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output, Error> {
+            let id = self
+                .id
                 .evaluate(wsv, &Context::default())
-                .wrap_err("Failed to get domain name")?;
+                .wrap_err("Failed to get domain id")
+                .map_err(Error::Evaluate)?;
             let key = self
                 .key
                 .evaluate(wsv, &Context::default())
-                .wrap_err("Failed to get key")?;
-            wsv.map_domain(&name, |domain| domain.metadata.get(&key).map(Clone::clone))?
-                .ok_or_else(|| eyre!("No metadata entry with this key."))
+                .wrap_err("Failed to get key")
+                .map_err(Error::Evaluate)?;
+            wsv.map_domain(&id, |domain| domain.metadata.get(&key).map(Clone::clone))?
+                .ok_or_else(|| FindError::MetadataKey(key).into())
         }
     }
 
     impl<W: WorldTrait> ValidQuery<W> for FindAssetDefinitionKeyValueByIdAndKey {
-        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output> {
+        #[metrics(+"find_asset_definition_key_value_by_id_and_key")]
+        fn execute(&self, wsv: &WorldStateView<W>) -> Result<Self::Output, Error> {
             let id = self
                 .id
                 .evaluate(wsv, &Context::default())
-                .wrap_err("Failed to get asset definition id")?;
+                .wrap_err("Failed to get asset definition id")
+                .map_err(Error::Evaluate)?;
             let key = self
                 .key
                 .evaluate(wsv, &Context::default())
-                .wrap_err("Failed to get key")?;
+                .wrap_err("Failed to get key")
+                .map_err(Error::Evaluate)?;
             Ok(wsv
                 .asset_definition_entry(&id)?
                 .definition
                 .metadata
                 .get(&key)
-                .ok_or_else(|| eyre!("Key {} not found in asset {}", key, id))?
+                .ok_or(FindError::MetadataKey(key))?
                 .clone())
         }
     }

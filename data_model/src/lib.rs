@@ -5,21 +5,17 @@
 
 use std::{
     error,
-    fmt::Debug,
+    fmt::{self, Debug},
     ops::RangeInclusive,
-    sync::Arc,
+    str,
     time::{Duration, SystemTime},
 };
 
-use eyre::{eyre, Result, WrapErr};
+use eyre::{eyre, Error, Result, WrapErr};
 use iroha_crypto::{Hash, PublicKey};
 use iroha_macro::{error::ErrorTryFromEnum, FromVariant};
 use iroha_schema::IntoSchema;
 use parity_scale_codec::{Decode, Encode};
-use prometheus::{
-    core::{AtomicU64, GenericGauge},
-    Encoder, IntCounter, Registry,
-};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -31,50 +27,119 @@ pub mod expression;
 pub mod fixed;
 pub mod isi;
 pub mod merkle;
+pub mod metadata;
 pub mod query;
 pub mod transaction;
 
-/// `Name` struct represents type for Iroha Entities names, like [`Domain`](`domain::Domain`)'s name or [`Account`](`account::Account`)'s
-/// name.
-pub type Name = String;
+/// `Name` struct represents type for Iroha Entities names, like
+/// [`Domain`](`domain::Domain`)'s name or
+/// [`Account`](`account::Account`)'s name.
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize, IntoSchema,
+)]
+pub struct Name(String);
+
+impl Name {
+    /// Construct [`Name`] if `name` is valid.
+    ///
+    /// # Errors
+    /// Fails if parsing fails
+    #[inline]
+    pub fn new(name: &str) -> Result<Self> {
+        name.parse::<Self>()
+    }
+
+    /// Instantly construct [`Name`] assuming `name` is valid.
+    #[inline]
+    #[allow(clippy::expect_used)]
+    pub fn test(name: &str) -> Self {
+        name.parse::<Self>()
+            .expect("Valid names never fail to parse")
+    }
+
+    /// Check if `range` contains the number of chars in the inner `String` of this [`Name`].
+    ///
+    /// # Errors
+    /// Fails if `range` does not
+    pub fn validate_len(&self, range: impl Into<RangeInclusive<usize>>) -> Result<()> {
+        let range = range.into();
+        if range.contains(&self.as_ref().chars().count()) {
+            Ok(())
+        } else {
+            Err(eyre!(
+                "The number of chars in the name must be {} to {}",
+                &range.start(),
+                &range.end()
+            ))
+        }
+    }
+}
+
+impl AsRef<str> for Name {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl str::FromStr for Name {
+    type Err = Error;
+    fn from_str(str: &str) -> Result<Self, Self::Err> {
+        if str.chars().any(char::is_whitespace) {
+            return Err(eyre!("Name must have no whitespaces"));
+        }
+        Ok(Self(str.to_owned()))
+    }
+}
+
+impl Debug for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Represents a sequence of bytes. Used for storing encoded data.
 pub type Bytes = Vec<u8>;
 
 #[allow(clippy::missing_errors_doc)]
-/// Similar to [`std::convert::AsMut`] but indicating that this reference conversion can fail.
+/// [`AsMut`] but reference conversion can fail.
 pub trait TryAsMut<T> {
     /// The type returned in the event of a conversion error.
     type Error;
 
-    /// Performs the conversion.
+    /// Perform the conversion.
     fn try_as_mut(&mut self) -> Result<&mut T, Self::Error>;
 }
 
 #[allow(clippy::missing_errors_doc)]
-/// Similar to [`std::convert::AsRef`] but indicating that this reference conversion can fail.
+/// Similar to [`AsRef`] but indicating that this reference conversion can fail.
 pub trait TryAsRef<T> {
     /// The type returned in the event of a conversion error.
     type Error;
 
-    /// Performs the conversion.
+    /// Perform the conversion.
     fn try_as_ref(&self) -> Result<&T, Self::Error>;
 }
 
 /// Represents Iroha Configuration parameters.
 #[derive(
-    Copy,
     Debug,
     Clone,
+    Copy,
     PartialEq,
     Eq,
-    Serialize,
-    Deserialize,
-    Encode,
-    Decode,
     PartialOrd,
     Ord,
     Hash,
+    Decode,
+    Encode,
+    Deserialize,
+    Serialize,
     IntoSchema,
 )]
 pub enum Parameter {
@@ -92,17 +157,18 @@ pub enum Parameter {
 #[derive(
     Debug,
     Clone,
-    Serialize,
-    Deserialize,
-    Encode,
-    Decode,
     PartialEq,
     Eq,
-    FromVariant,
     PartialOrd,
     Ord,
+    Decode,
+    Encode,
+    Deserialize,
+    Serialize,
+    FromVariant,
     IntoSchema,
 )]
+#[allow(clippy::enum_variant_names)]
 pub enum IdBox {
     /// [`AccountId`](`account::Id`) variant.
     AccountId(account::Id),
@@ -110,8 +176,8 @@ pub enum IdBox {
     AssetId(asset::Id),
     /// [`AssetDefinitionId`](`asset::DefinitionId`) variant.
     AssetDefinitionId(asset::DefinitionId),
-    /// [`DomainName`](`Name`) variant.
-    DomainName(Name),
+    /// [`DomainId`](`Id`) variant.
+    DomainId(domain::Id),
     /// [`PeerId`](`peer::Id`) variant.
     PeerId(peer::Id),
     /// [`RoleId`](`role::Id`) variant.
@@ -125,15 +191,15 @@ pub enum IdBox {
 #[derive(
     Debug,
     Clone,
-    Serialize,
-    Deserialize,
-    Encode,
-    Decode,
     PartialEq,
     Eq,
-    FromVariant,
     PartialOrd,
     Ord,
+    Decode,
+    Encode,
+    Deserialize,
+    Serialize,
+    FromVariant,
     IntoSchema,
 )]
 pub enum IdentifiableBox {
@@ -163,40 +229,44 @@ pub type ValueBox = Box<Value>;
 #[derive(
     Debug,
     Clone,
-    Serialize,
-    Deserialize,
-    Encode,
-    Decode,
     PartialEq,
     Eq,
-    FromVariant,
     PartialOrd,
     Ord,
+    Decode,
+    Encode,
+    Deserialize,
+    Serialize,
+    FromVariant,
     IntoSchema,
 )]
 #[allow(clippy::enum_variant_names)]
 pub enum Value {
-    /// `u32` integer.
+    /// [`u32`] integer.
     U32(u32),
-    /// `u128` integer.
+    /// [`u128`] integer.
     U128(u128),
-    /// `bool` value.
+    /// [`bool`] value.
     Bool(bool),
-    /// `String` value.
+    /// [`String`] value.
     String(String),
-    /// `Fixed` value
+    /// [`Name`] value.
+    Name(Name),
+    /// [`Fixed`] value
     Fixed(fixed::Fixed),
-    /// `Vec` of `Value`.
+    /// [`Vec`] of `Value`.
     Vec(
         #[skip_from]
         #[skip_try_from]
         Vec<Value>,
     ),
-    /// `Id` of `Asset`, `Account`, etc.
+    /// Recursive inclusion of LimitedMetadata,
+    LimitedMetadata(metadata::Metadata),
+    /// [`Id`] of [`Asset`], [`Account`], etc.
     Id(IdBox),
-    /// `Identifiable` as `Asset`, `Account` etc.
+    /// [`Identifiable`] as [`Asset`], [`Account`] etc.
     Identifiable(IdentifiableBox),
-    /// `PublicKey`.
+    /// [`PublicKey`].
     PublicKey(PublicKey),
     /// Iroha `Parameter` variant.
     Parameter(Parameter),
@@ -218,8 +288,10 @@ impl Value {
 
         match self {
             U32(_) | U128(_) | Id(_) | PublicKey(_) | Bool(_) | Parameter(_) | Identifiable(_)
-            | String(_) | Fixed(_) | TransactionValue(_) | PermissionToken(_) | Hash(_) => 1,
-            Vec(v) => v.iter().map(Self::len).sum::<usize>() + 1,
+            | String(_) | Name(_) | Fixed(_) | TransactionValue(_) | PermissionToken(_)
+            | Hash(_) => 1_usize,
+            Vec(v) => v.iter().map(Self::len).sum::<usize>() + 1_usize,
+            LimitedMetadata(data) => data.nested_len() + 1_usize,
             SignatureCheckCondition(s) => s.0.len(),
         }
     }
@@ -253,6 +325,7 @@ from_and_try_from_value_idbox!(
     AccountId(account::Id),
     AssetId(asset::Id),
     AssetDefinitionId(asset::DefinitionId),
+    DomainId(domain::Id),
     PeerId(peer::Id),
 );
 // TODO: Should we wrap String with new type in order to convert like here?
@@ -341,7 +414,7 @@ where
                 .collect::<Result<Vec<_>, _>>()
                 .wrap_err("Failed to convert to vector")
         } else {
-            Err(eyre!("Expected vector, but found something else"))
+            Err(eyre::eyre!("Expected vector, but found something else"))
         }
     }
 }
@@ -358,7 +431,7 @@ pub trait Identifiable: Debug + Clone {
 }
 
 /// Limits of length of the identifiers (e.g. in [`domain::Domain`], [`account::NewAccount`], [`asset::AssetDefinition`]) in number of chars
-#[derive(Debug, Clone, Copy, Decode, Encode, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode, Encode, Deserialize, Serialize)]
 pub struct LengthLimits {
     /// Minimal length in number of chars (inclusive).
     min: u32,
@@ -386,110 +459,6 @@ pub fn current_time() -> Duration {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("Failed to get the current system time")
-}
-
-/// Thin wrapper around duration that `impl`s [`Default`]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Uptime(Duration);
-
-impl Default for Uptime {
-    fn default() -> Self {
-        Self(Duration::from_millis(0))
-    }
-}
-
-/// Response body for GET status request
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-pub struct Status {
-    /// Number of connected peers, except for the reporting peer itself
-    pub peers: u64,
-    /// Number of committed blocks
-    pub blocks: u64,
-    /// Number of transactions committed in the last block
-    pub txs: u64,
-    /// Uptime since genesis block creation
-    pub uptime: Uptime,
-}
-
-impl From<&Arc<Metrics>> for Status {
-    fn from(val: &Arc<Metrics>) -> Self {
-        Self {
-            peers: val.connected_peers.get(),
-            blocks: val.block_height.get(),
-            txs: val.txs.get(),
-            uptime: Uptime(Duration::from_millis(val.uptime_since_genesis_ms.get())),
-        }
-    }
-}
-
-/// A strict superset of [`Status`].
-#[derive(Debug)]
-pub struct Metrics {
-    /// Transactions in the last committed block
-    pub txs: IntCounter,
-    /// Current block height
-    pub block_height: IntCounter,
-    /// Total number of currently connected peers
-    pub connected_peers: GenericGauge<AtomicU64>,
-    /// Uptime of the network, starting from commit of the genesis block
-    pub uptime_since_genesis_ms: GenericGauge<AtomicU64>,
-    // Internal use only.
-    registry: Registry,
-}
-
-impl Default for Metrics {
-    // The constructors either always fail, or never.
-    #[allow(clippy::expect_used)]
-    fn default() -> Self {
-        let txs = IntCounter::new("txs", "Transactions committed").expect("Infallible");
-        let block_height =
-            IntCounter::new("block_height", "Current block height").expect("Infallible");
-        let connected_peers = GenericGauge::new(
-            "connected_peers",
-            "Total number of currently connected peers",
-        )
-        .expect("Infallible");
-        let uptime_since_genesis_ms = GenericGauge::new(
-            "uptime_since_genesis_ms",
-            "Uptime of the network, starting from creation of the genesis block",
-        )
-        .expect("Infallible");
-        let registry = Registry::new();
-        registry
-            .register(Box::new(txs.clone()))
-            .expect("register txs should not fail");
-        registry
-            .register(Box::new(block_height.clone()))
-            .expect("register block_height should not fail");
-        registry
-            .register(Box::new(connected_peers.clone()))
-            .expect("register connected_peers should not fail");
-        registry
-            .register(Box::new(uptime_since_genesis_ms.clone()))
-            .expect("register uptime should not fail");
-        Self {
-            txs,
-            block_height,
-            connected_peers,
-            uptime_since_genesis_ms,
-            registry,
-        }
-    }
-}
-
-impl Metrics {
-    /// Convert the current [`Metrics`] into a Prometheus-readable format.
-    ///
-    /// # Errors
-    /// - If [`Encoder`] fails to encode the data
-    /// - If the buffer produced by [`Encoder`] causes [`String::from_utf8`] to fail.
-    pub fn try_to_string(&self) -> eyre::Result<String> {
-        let mut buffer = vec![];
-        let encoder = prometheus::TextEncoder::new();
-        let metric_families = self.registry.gather();
-        Encoder::encode(&encoder, &metric_families, &mut buffer)?;
-        Ok(String::from_utf8(buffer)?)
-    }
 }
 
 #[cfg(feature = "roles")]
@@ -520,11 +489,11 @@ pub mod role {
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Encode,
-        Decode,
         Hash,
+        Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct Id {
@@ -536,26 +505,26 @@ pub mod role {
         /// Constructor.
         #[inline]
         pub fn new(name: impl Into<Name>) -> Self {
-            Id { name: name.into() }
+            Self { name: name.into() }
         }
     }
 
     impl From<Name> for Id {
         #[inline]
         fn from(name: Name) -> Self {
-            Id::new(name)
+            Self::new(name)
         }
     }
 
     impl From<Id> for Value {
         #[inline]
         fn from(id: Id) -> Self {
-            Value::Id(IdBox::RoleId(id))
+            Self::Id(IdBox::RoleId(id))
         }
     }
 
     impl TryFrom<Value> for Id {
-        type Error = iroha_macro::error::ErrorTryFromEnum<Value, Id>;
+        type Error = iroha_macro::error::ErrorTryFromEnum<Value, Self>;
 
         #[inline]
         fn try_from(value: Value) -> Result<Self, Self::Error> {
@@ -581,7 +550,7 @@ pub mod role {
     }
 
     impl TryFrom<Value> for Role {
-        type Error = iroha_macro::error::ErrorTryFromEnum<Value, Role>;
+        type Error = iroha_macro::error::ErrorTryFromEnum<Value, Self>;
 
         #[inline]
         fn try_from(value: Value) -> Result<Self, Self::Error> {
@@ -601,10 +570,10 @@ pub mod role {
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Encode,
         Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct Role {
@@ -617,8 +586,8 @@ pub mod role {
     impl Role {
         /// Constructor.
         #[inline]
-        pub fn new(id: impl Into<Id>, permissions: impl Into<BTreeSet<PermissionToken>>) -> Role {
-            Role {
+        pub fn new(id: impl Into<Id>, permissions: impl Into<BTreeSet<PermissionToken>>) -> Self {
+            Self {
                 id: id.into(),
                 permissions: permissions.into(),
             }
@@ -654,10 +623,10 @@ pub mod permissions {
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Encode,
         Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct PermissionToken {
@@ -689,13 +658,11 @@ pub mod account {
     use std::{
         collections::{BTreeMap, BTreeSet},
         fmt,
-        ops::RangeInclusive,
     };
 
     use eyre::{eyre, Error, Result};
     //TODO: get rid of it?
     use iroha_crypto::SignatureOf;
-    use iroha_macro::Io;
     use iroha_schema::IntoSchema;
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Serialize};
@@ -704,7 +671,7 @@ pub mod account {
     use crate::role::Id as RoleId;
     use crate::{
         asset::AssetsMap,
-        domain::GENESIS_DOMAIN_NAME,
+        domain::prelude::*,
         expression::{ContainsAny, ContextValue, EvaluatesTo, ExpressionBox, WhereBuilder},
         metadata::Metadata,
         permissions::PermissionToken,
@@ -731,7 +698,7 @@ pub mod account {
     pub const ACCOUNT_SIGNATORIES_VALUE: &str = "account_signatories";
 
     /// Genesis account. Used to mainly be converted to ordinary `Account` struct.
-    #[derive(Debug, Serialize, Deserialize, Decode, Encode, IntoSchema)]
+    #[derive(Debug, Decode, Encode, Deserialize, Serialize, IntoSchema)]
     pub struct GenesisAccount {
         public_key: PublicKey,
     }
@@ -746,23 +713,22 @@ pub mod account {
     impl From<GenesisAccount> for Account {
         #[inline]
         fn from(account: GenesisAccount) -> Self {
-            Account::with_signatory(Id::genesis_account(), account.public_key)
+            Account::with_signatory(Id::genesis(), account.public_key)
         }
     }
 
     /// Condition which checks if the account has the right signatures.
     #[derive(
-        Clone,
         Debug,
+        Clone,
         PartialEq,
         Eq,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
-        Decode,
         PartialOrd,
         Ord,
+        Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct SignatureCheckCondition(pub EvaluatesTo<bool>);
@@ -799,17 +765,16 @@ pub mod account {
 
     /// Type which is used for registering `Account`
     #[derive(
-        Clone,
         Debug,
+        Clone,
         PartialEq,
         Eq,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
-        Decode,
         PartialOrd,
         Ord,
+        Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct NewAccount {
@@ -843,7 +808,7 @@ pub mod account {
     }
 
     impl NewAccount {
-        /// Default `NewAccount` constructor.
+        /// Construct [`NewAccount`].
         #[inline]
         pub fn new(id: Id) -> Self {
             Self {
@@ -863,29 +828,10 @@ pub mod account {
                 metadata: Metadata::default(),
             }
         }
-
-        /// Checks the length of the id in bytes is in a valid range
-        ///
-        /// # Errors
-        /// Fails if limit check fails
-        pub fn validate_len(&self, range: impl Into<RangeInclusive<usize>>) -> Result<()> {
-            let range = range.into();
-            if range.contains(&self.id.name.chars().count()) {
-                Ok(())
-            } else {
-                Err(eyre!(
-                    "Length of the account name must be in range {}-{}",
-                    &range.start(),
-                    &range.end()
-                ))
-            }
-        }
     }
 
     /// Account entity is an authority which is used to execute `Iroha Special Instructions`.
-    #[derive(
-        Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Io, Encode, Decode, IntoSchema,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Deserialize, Serialize, IntoSchema)]
     pub struct Account {
         /// An Identification of the [`Account`].
         pub id: Id,
@@ -929,32 +875,31 @@ pub mod account {
     /// let id = Id::new("user", "company");
     /// ```
     #[derive(
-        Clone,
         Debug,
+        Clone,
         PartialEq,
         Eq,
         PartialOrd,
         Ord,
         Hash,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
         Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct Id {
         /// [`Account`]'s name.
         pub name: Name,
-        /// [`Account`]'s [`Domain`](`crate::domain::Domain`)'s name.
-        pub domain_name: Name,
+        /// [`Account`]'s [`Domain`](`crate::domain::Domain`)'s id.
+        pub domain_id: DomainId,
     }
 
     impl Account {
-        /// Default [`Account`] constructor.
+        /// Construct [`Account`].
         #[inline]
         pub fn new(id: Id) -> Self {
-            Account {
+            Self {
                 id,
                 assets: AssetsMap::new(),
                 signatories: Vec::new(),
@@ -970,7 +915,7 @@ pub mod account {
         #[inline]
         pub fn with_signatory(id: Id, signatory: PublicKey) -> Self {
             let signatories = vec![signatory];
-            Account {
+            Self {
                 id,
                 assets: AssetsMap::new(),
                 signatories,
@@ -1014,22 +959,33 @@ pub mod account {
     }
 
     impl Id {
-        /// `Id` constructor used to easily create an `Id` from two string slices - one for the
-        /// account's name, another one for the container's name.
+        /// Construct [`Id`] from an account `name` and a `domain_name` if these names are valid.
+        ///
+        /// # Errors
+        /// Fails if any sub-construction fails
         #[inline]
-        pub fn new(name: &str, domain_name: &str) -> Self {
-            Id {
-                name: name.to_owned(),
-                domain_name: domain_name.to_owned(),
+        pub fn new(name: &str, domain_name: &str) -> Result<Self> {
+            Ok(Self {
+                name: Name::new(name)?,
+                domain_id: DomainId::new(domain_name)?,
+            })
+        }
+
+        /// Instantly construct [`Id`] from an account `name` and a `domain_name` assuming these names are valid.
+        #[inline]
+        pub fn test(name: &str, domain_name: &str) -> Self {
+            Self {
+                name: Name::test(name),
+                domain_id: DomainId::test(domain_name),
             }
         }
 
-        /// `Id` of the genesis account.
+        /// Construct [`Id`] of the genesis account.
         #[inline]
-        pub fn genesis_account() -> Self {
-            Id {
-                name: GENESIS_ACCOUNT_NAME.to_owned(),
-                domain_name: GENESIS_DOMAIN_NAME.to_owned(),
+        pub fn genesis() -> Self {
+            Self {
+                name: Name::test(GENESIS_ACCOUNT_NAME),
+                domain_id: DomainId::test(GENESIS_DOMAIN_NAME),
             }
         }
     }
@@ -1046,7 +1002,7 @@ pub mod account {
         fn from_iter<T: IntoIterator<Item = Account>>(iter: T) -> Self {
             iter.into_iter()
                 .map(Into::into)
-                .collect::<Vec<Value>>()
+                .collect::<Vec<Self>>()
                 .into()
         }
     }
@@ -1060,16 +1016,16 @@ pub mod account {
             if vector.len() != 2 {
                 return Err(eyre!("Id should have format `name@domain_name`"));
             }
-            Ok(Id {
-                name: String::from(vector[0]),
-                domain_name: String::from(vector[1]),
+            Ok(Self {
+                name: Name::new(vector[0])?,
+                domain_id: DomainId::new(vector[1])?,
             })
         }
     }
 
     impl fmt::Display for Id {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{}@{}", self.name, self.domain_name)
+            write!(f, "{}@{}", self.name, self.domain_id)
         }
     }
 
@@ -1087,18 +1043,18 @@ pub mod asset {
         cmp::Ordering,
         collections::BTreeMap,
         fmt::{self, Display, Formatter},
-        ops::RangeInclusive,
         str::FromStr,
     };
 
     use eyre::{eyre, Error, Result, WrapErr};
-    use iroha_macro::{FromVariant, Io};
+    use iroha_macro::FromVariant;
     use iroha_schema::IntoSchema;
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Serialize};
 
     use crate::{
         account::prelude::*,
+        domain::prelude::*,
         fixed,
         fixed::Fixed,
         metadata::{Limits as MetadataLimits, Metadata},
@@ -1113,9 +1069,7 @@ pub mod asset {
     pub type AssetDefinitionsMap = BTreeMap<DefinitionId, AssetDefinitionEntry>;
 
     /// An entry in [`AssetDefinitionsMap`].
-    #[derive(
-        Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Io, Encode, Decode, IntoSchema,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Deserialize, Serialize, IntoSchema)]
     pub struct AssetDefinitionEntry {
         /// Asset definition.
         pub definition: AssetDefinition,
@@ -1139,11 +1093,8 @@ pub mod asset {
 
     impl AssetDefinitionEntry {
         /// Constructor.
-        pub const fn new(
-            definition: AssetDefinition,
-            registered_by: AccountId,
-        ) -> AssetDefinitionEntry {
-            AssetDefinitionEntry {
+        pub const fn new(definition: AssetDefinition, registered_by: AccountId) -> Self {
+            Self {
                 definition,
                 registered_by,
             }
@@ -1152,17 +1103,16 @@ pub mod asset {
 
     /// Asset definition defines type of that asset.
     #[derive(
-        Clone,
         Debug,
+        Clone,
         PartialEq,
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
         Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct AssetDefinition {
@@ -1178,9 +1128,7 @@ pub mod asset {
 
     /// Asset represents some sort of commodity or value.
     /// All possible variants of [`Asset`] entity's components.
-    #[derive(
-        Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Io, Encode, Decode, IntoSchema,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Deserialize, Serialize, IntoSchema)]
     pub struct Asset {
         /// Component Identification.
         pub id: Id,
@@ -1190,18 +1138,17 @@ pub mod asset {
 
     /// Asset's inner value type.
     #[derive(
-        Copy,
-        Clone,
         Debug,
+        Clone,
+        Copy,
         PartialEq,
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
         Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub enum AssetValueType {
@@ -1217,7 +1164,7 @@ pub mod asset {
 
     impl FromStr for AssetValueType {
         type Err = Error;
-        fn from_str(value_type: &str) -> Result<AssetValueType> {
+        fn from_str(value_type: &str) -> Result<Self> {
             serde_json::from_value(serde_json::json!(value_type))
                 .wrap_err("Failed to deserialize value type")
         }
@@ -1225,17 +1172,7 @@ pub mod asset {
 
     /// Asset's inner value.
     #[derive(
-        Clone,
-        Debug,
-        PartialEq,
-        Eq,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
-        Decode,
-        FromVariant,
-        IntoSchema,
+        Debug, Clone, PartialEq, Eq, Decode, Encode, Deserialize, Serialize, FromVariant, IntoSchema,
     )]
     pub enum AssetValue {
         /// Asset's Quantity.
@@ -1252,19 +1189,19 @@ pub mod asset {
         /// Returns the asset type as a string.
         pub const fn value_type(&self) -> AssetValueType {
             match *self {
-                AssetValue::Quantity(_) => AssetValueType::Quantity,
-                AssetValue::BigQuantity(_) => AssetValueType::BigQuantity,
-                AssetValue::Fixed(_) => AssetValueType::Fixed,
-                AssetValue::Store(_) => AssetValueType::Store,
+                Self::Quantity(_) => AssetValueType::Quantity,
+                Self::BigQuantity(_) => AssetValueType::BigQuantity,
+                Self::Fixed(_) => AssetValueType::Fixed,
+                Self::Store(_) => AssetValueType::Store,
             }
         }
         /// Returns true if this value is zero, false if it contains [`Metadata`] or positive value
         pub const fn is_zero_value(&self) -> bool {
             match *self {
-                AssetValue::Quantity(q) => q == 0_u32,
-                AssetValue::BigQuantity(q) => q == 0_u128,
-                AssetValue::Fixed(ref q) => q.is_zero(),
-                AssetValue::Store(_) => false,
+                Self::Quantity(q) => q == 0_u32,
+                Self::BigQuantity(q) => q == 0_u128,
+                Self::Fixed(ref q) => q.is_zero(),
+                Self::Store(_) => false,
             }
         }
     }
@@ -1342,41 +1279,39 @@ pub mod asset {
     /// let definition_id = DefinitionId::new("xor", "soramitsu");
     /// ```
     #[derive(
-        Clone,
         Debug,
+        Clone,
         PartialEq,
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
-        Decode,
         Hash,
+        Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct DefinitionId {
         /// Asset's name.
         pub name: Name,
-        /// Domain's name.
-        pub domain_name: Name,
+        /// Domain's id.
+        pub domain_id: DomainId,
     }
 
     /// Identification of an Asset's components include Entity Id ([`Asset::Id`]) and [`Account::Id`].
     #[derive(
-        Clone,
         Debug,
+        Clone,
         PartialEq,
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
-        Decode,
         Hash,
+        Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct Id {
@@ -1387,10 +1322,10 @@ pub mod asset {
     }
 
     impl AssetDefinition {
-        /// Default [`AssetDefinition`] constructor.
+        /// Construct [`AssetDefinition`].
         #[inline]
         pub fn new(id: DefinitionId, value_type: AssetValueType, mintable: bool) -> Self {
-            AssetDefinition {
+            Self {
                 value_type,
                 id,
                 metadata: Metadata::new(),
@@ -1445,29 +1380,12 @@ pub mod asset {
         pub fn new_store_token(id: DefinitionId) -> Self {
             AssetDefinition::new(id, AssetValueType::Store, false)
         }
-
-        /// Checks the length of the id in bytes is in a valid range
-        ///
-        /// # Errors
-        /// Fails if limit check fails
-        pub fn validate_len(&self, range: impl Into<RangeInclusive<usize>>) -> Result<()> {
-            let range = range.into();
-            if range.contains(&self.id.name.len()) {
-                Ok(())
-            } else {
-                Err(eyre!(
-                    "Length of the asset defenition name must be in range {}-{}",
-                    &range.start(),
-                    &range.end()
-                ))
-            }
-        }
     }
 
     impl Asset {
         /// Constructor
         pub fn new<V: Into<AssetValue>>(id: Id, value: V) -> Self {
-            Asset {
+            Self {
                 id,
                 value: value.into(),
             }
@@ -1476,7 +1394,7 @@ pub mod asset {
         /// `Asset` with `quantity` value constructor.
         #[inline]
         pub fn with_quantity(id: Id, quantity: u32) -> Self {
-            Asset {
+            Self {
                 id,
                 value: quantity.into(),
             }
@@ -1485,7 +1403,7 @@ pub mod asset {
         /// `Asset` with `big_quantity` value constructor.
         #[inline]
         pub fn with_big_quantity(id: Id, big_quantity: u128) -> Self {
-            Asset {
+            Self {
                 id,
                 value: big_quantity.into(),
             }
@@ -1497,13 +1415,13 @@ pub mod asset {
         /// Fails if limit check fails
         pub fn with_parameter(
             id: Id,
-            key: String,
+            key: Name,
             value: Value,
             limits: MetadataLimits,
         ) -> Result<Self> {
             let mut store = Metadata::new();
             store.insert_with_limits(key, value, limits)?;
-            Ok(Asset {
+            Ok(Self {
                 id,
                 value: store.into(),
             })
@@ -1540,43 +1458,52 @@ pub mod asset {
     }
 
     impl DefinitionId {
-        /// [`Id`] constructor used to easily create an [`Id`] from three string slices - one for the
-        /// asset definition's name, another one for the domain's name.
+        /// Construct [`Id`] from an asset definition `name` and a `domain_name` if these names are valid.
+        ///
+        /// # Errors
+        /// Fails if any sub-construction fails
         #[inline]
-        pub fn new(name: &str, domain_name: &str) -> Self {
-            DefinitionId {
-                name: name.to_owned(),
-                domain_name: domain_name.to_owned(),
+        pub fn new(name: &str, domain_name: &str) -> Result<Self> {
+            Ok(Self {
+                name: Name::new(name)?,
+                domain_id: DomainId::new(domain_name)?,
+            })
+        }
+
+        /// Instantly construct [`Id`] from an asset definition `name` and a `domain_name` assuming these names are valid.
+        #[inline]
+        pub fn test(name: &str, domain_name: &str) -> Self {
+            Self {
+                name: Name::test(name),
+                domain_id: DomainId::test(domain_name),
             }
         }
     }
 
     impl Id {
-        /// [`Id`] constructor used to easily create an [`Id`] from an names of asset definition and
-        /// account.
+        /// Construct [`Id`] from [`DefinitionId`] and [`AccountId`].
         #[inline]
-        pub fn from_names(
+        pub const fn new(definition_id: DefinitionId, account_id: AccountId) -> Self {
+            Self {
+                definition_id,
+                account_id,
+            }
+        }
+
+        /// Instantly construct [`Id`] from names which constitute [`DefinitionId`] and [`AccountId`] assuming these names are valid.
+        #[inline]
+        pub fn test(
             asset_definition_name: &str,
             asset_definition_domain_name: &str,
             account_name: &str,
             account_domain_name: &str,
         ) -> Self {
-            Id {
-                definition_id: DefinitionId::new(
+            Self {
+                definition_id: DefinitionId::test(
                     asset_definition_name,
                     asset_definition_domain_name,
                 ),
-                account_id: AccountId::new(account_name, account_domain_name),
-            }
-        }
-
-        /// [`Id`] constructor used to easily create an [`Id`] from an [`DefinitionId`](`crate::asset::DefinitionId`) and
-        /// an [`AccountId`].
-        #[inline]
-        pub const fn new(definition_id: DefinitionId, account_id: AccountId) -> Self {
-            Id {
-                definition_id,
-                account_id,
+                account_id: AccountId::test(account_name, account_domain_name),
             }
         }
     }
@@ -1593,7 +1520,7 @@ pub mod asset {
         fn from_iter<T: IntoIterator<Item = Asset>>(iter: T) -> Self {
             iter.into_iter()
                 .map(Into::into)
-                .collect::<Vec<Value>>()
+                .collect::<Vec<Self>>()
                 .into()
         }
     }
@@ -1602,7 +1529,7 @@ pub mod asset {
         fn from_iter<T: IntoIterator<Item = AssetDefinition>>(iter: T) -> Self {
             iter.into_iter()
                 .map(Into::into)
-                .collect::<Vec<Value>>()
+                .collect::<Vec<Self>>()
                 .into()
         }
     }
@@ -1618,16 +1545,16 @@ pub mod asset {
                     "Asset definition ID should have format `name#domain_name`.",
                 ));
             }
-            Ok(DefinitionId {
-                name: String::from(vector[0]),
-                domain_name: String::from(vector[1]),
+            Ok(Self {
+                name: Name::new(vector[0])?,
+                domain_id: DomainId::new(vector[1])?,
             })
         }
     }
 
     impl Display for DefinitionId {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            write!(f, "{}#{}", self.name, self.domain_name)
+            write!(f, "{}#{}", self.name, self.domain_id)
         }
     }
 
@@ -1649,15 +1576,11 @@ pub mod asset {
 pub mod domain {
     //! This module contains [`Domain`](`crate::domain::Domain`) structure and related implementations and trait implementations.
 
-    use std::{
-        cmp::Ordering, collections::BTreeMap, convert::Infallible, iter, ops::RangeInclusive,
-        str::FromStr,
-    };
+    use std::{cmp::Ordering, collections::BTreeMap, fmt, iter, str::FromStr};
 
     use dashmap::DashMap;
-    use eyre::{eyre, Result};
+    use eyre::{Error, Result};
     use iroha_crypto::PublicKey;
-    use iroha_macro::Io;
     use iroha_schema::IntoSchema;
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Serialize};
@@ -1672,9 +1595,9 @@ pub mod domain {
     /// Genesis domain name. Genesis domain should contain only genesis account.
     pub const GENESIS_DOMAIN_NAME: &str = "genesis";
 
-    /// `DomainsMap` provides an API to work with collection of key (`Name`) - value
-    /// (`Domain`) pairs.
-    pub type DomainsMap = DashMap<Name, Domain>;
+    /// [`DomainsMap`] provides an API to work with collection of
+    /// key ([`Id`]) - value ([`Domain`]) pairs.
+    pub type DomainsMap = DashMap<Id, Domain>;
 
     /// Genesis domain. It will contain only one `genesis` account.
     #[derive(Debug, Decode, Encode, Deserialize, Serialize, IntoSchema)]
@@ -1693,9 +1616,9 @@ pub mod domain {
     impl From<GenesisDomain> for Domain {
         fn from(domain: GenesisDomain) -> Self {
             Self {
-                name: GENESIS_DOMAIN_NAME.to_owned(),
+                id: Id::test(GENESIS_DOMAIN_NAME),
                 accounts: iter::once((
-                    <Account as Identifiable>::Id::genesis_account(),
+                    <Account as Identifiable>::Id::genesis(),
                     GenesisAccount::new(domain.genesis_key).into(),
                 ))
                 .collect(),
@@ -1706,12 +1629,10 @@ pub mod domain {
     }
 
     /// Named group of [`Account`] and [`Asset`](`crate::asset::Asset`) entities.
-    #[derive(
-        Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Io, Encode, Decode, IntoSchema,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Deserialize, Serialize, IntoSchema)]
     pub struct Domain {
-        /// Domain name, for example company name.
-        pub name: Name,
+        /// Identification of this [`Domain`].
+        pub id: Id,
         /// Accounts of the domain.
         pub accounts: AccountsMap,
         /// Assets of the domain.
@@ -1720,63 +1641,49 @@ pub mod domain {
         pub metadata: Metadata,
     }
 
-    impl FromStr for Domain {
-        type Err = Infallible;
-        fn from_str(name: &str) -> Result<Self, Self::Err> {
-            Ok(Self::new(name))
-        }
-    }
-
     impl PartialOrd for Domain {
         #[inline]
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.name.cmp(&other.name))
+            Some(self.id.cmp(&other.id))
         }
     }
 
     impl Ord for Domain {
         #[inline]
         fn cmp(&self, other: &Self) -> Ordering {
-            self.name.cmp(&other.name)
+            self.id.cmp(&other.id)
         }
     }
 
     impl Domain {
-        /// Default `Domain` constructor.
-        pub fn new(name: &str) -> Self {
-            Domain {
-                name: name.to_owned(),
+        /// Construct [`Domain`] from [`Id`].
+        pub fn new(id: Id) -> Self {
+            Self {
+                id,
                 accounts: AccountsMap::new(),
                 asset_definitions: AssetDefinitionsMap::new(),
                 metadata: Metadata::new(),
             }
         }
 
-        /// Checks the length of the id in bytes is in a valid range
-        ///
-        /// # Errors
-        /// Fails if limit check fails
-        pub fn validate_len(&self, range: impl Into<RangeInclusive<usize>>) -> Result<()> {
-            let range = range.into();
-            if range.contains(&self.name.len()) {
-                Ok(())
-            } else {
-                Err(eyre!(
-                    "Length of the domain name must be in range {}-{}",
-                    &range.start(),
-                    &range.end()
-                ))
+        /// Instantly construct [`Domain`] assuming `name` is valid.
+        pub fn test(name: &str) -> Self {
+            Self {
+                id: Id::test(name),
+                accounts: AccountsMap::new(),
+                asset_definitions: AssetDefinitionsMap::new(),
+                metadata: Metadata::new(),
             }
         }
 
-        /// Domain constructor with presetup accounts. Useful for testing purposes.
+        /// Domain constructor with pre-setup accounts. Useful for testing purposes.
         pub fn with_accounts(name: &str, accounts: impl IntoIterator<Item = Account>) -> Self {
             let accounts_map = accounts
                 .into_iter()
                 .map(|account| (account.id.clone(), account))
                 .collect();
-            Domain {
-                name: name.to_owned(),
+            Self {
+                id: Id::test(name),
                 accounts: accounts_map,
                 asset_definitions: AssetDefinitionsMap::new(),
                 metadata: Metadata::new(),
@@ -1785,31 +1692,85 @@ pub mod domain {
     }
 
     impl Identifiable for Domain {
-        type Id = Name;
+        type Id = Id;
     }
 
     impl FromIterator<Domain> for Value {
         fn from_iter<T: IntoIterator<Item = Domain>>(iter: T) -> Self {
             iter.into_iter()
                 .map(Into::into)
-                .collect::<Vec<Value>>()
+                .collect::<Vec<Self>>()
                 .into()
+        }
+    }
+
+    /// Identification of a [`Domain`].
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        Decode,
+        Encode,
+        Deserialize,
+        Serialize,
+        IntoSchema,
+    )]
+    pub struct Id {
+        /// [`Name`] unique to a [`Domain`] e.g. company name
+        pub name: Name,
+    }
+
+    impl Id {
+        /// Construct [`Id`] if the given domain `name` is valid.
+        ///
+        /// # Errors
+        /// Fails if any sub-construction fails
+        #[inline]
+        pub fn new(name: &str) -> Result<Self> {
+            Ok(Self {
+                name: Name::new(name)?,
+            })
+        }
+
+        /// Instantly construct [`Id`] assuming the given domain `name` is valid.
+        #[inline]
+        pub fn test(name: &str) -> Self {
+            Self {
+                name: Name::test(name),
+            }
+        }
+    }
+
+    impl FromStr for Id {
+        type Err = Error;
+
+        fn from_str(name: &str) -> Result<Self, Self::Err> {
+            Self::new(name)
+        }
+    }
+
+    impl fmt::Display for Id {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.name)
         }
     }
 
     /// The prelude re-exports most commonly used traits, structs and macros from this crate.
     pub mod prelude {
-        pub use super::{Domain, GenesisDomain, GENESIS_DOMAIN_NAME};
+        pub use super::{Domain, GenesisDomain, Id as DomainId, GENESIS_DOMAIN_NAME};
     }
 }
 
 pub mod peer {
     //! This module contains [`Peer`] structure and related implementations and traits implementations.
 
-    use std::hash::Hash;
+    use std::{fmt, hash::Hash};
 
     use dashmap::DashSet;
-    use iroha_macro::Io;
     use iroha_schema::IntoSchema;
     use parity_scale_codec::{Decode, Encode};
     use serde::{Deserialize, Serialize};
@@ -1821,17 +1782,16 @@ pub mod peer {
 
     /// Peer represents Iroha instance.
     #[derive(
-        Clone,
         Debug,
+        Clone,
         PartialEq,
         Eq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
         Decode,
+        Encode,
+        Deserialize,
+        Serialize,
         IntoSchema,
     )]
     pub struct Peer {
@@ -1841,32 +1801,37 @@ pub mod peer {
 
     /// Peer's identification.
     #[derive(
-        Clone,
         Debug,
+        Clone,
         Eq,
         PartialEq,
         PartialOrd,
         Ord,
-        Serialize,
-        Deserialize,
-        Io,
-        Encode,
-        Decode,
-        IntoSchema,
         Hash,
+        Decode,
+        Encode,
+        Deserialize,
+        Serialize,
+        IntoSchema,
     )]
     pub struct Id {
-        /// Address of the `Peer`'s entrypoint.
+        /// Address of the [`Peer`]'s entrypoint.
         pub address: String,
-        /// Public Key of the `Peer`.
+        /// Public Key of the [`Peer`].
         pub public_key: PublicKey,
+    }
+
+    impl fmt::Display for Id {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fmt::Debug::fmt(self, f)
+        }
     }
 
     impl Peer {
         /// Construct `Peer` given `id`.
         #[inline]
         pub const fn new(id: Id) -> Self {
-            Peer { id }
+            Self { id }
         }
     }
 
@@ -1878,7 +1843,7 @@ pub mod peer {
         /// Construct `Id` given `public_key` and `address`.
         #[inline]
         pub fn new(address: &str, public_key: &PublicKey) -> Self {
-            Id {
+            Self {
                 address: address.to_owned(),
                 public_key: public_key.clone(),
             }
@@ -1968,8 +1933,8 @@ pub mod pagination {
 
     impl Pagination {
         /// Constructs [`Pagination`].
-        pub const fn new(start: Option<usize>, limit: Option<usize>) -> Pagination {
-            Pagination { start, limit }
+        pub const fn new(start: Option<usize>, limit: Option<usize>) -> Self {
+            Self { start, limit }
         }
     }
 
@@ -2030,8 +1995,8 @@ pub mod pagination {
         }
     }
 
-    /// The prelude re-exports most commonly used traits, structs and macros from this module.
     pub mod prelude {
+        //! Prelude: re-export most commonly used traits, structs and macros from this module.
         pub use super::*;
     }
 
@@ -2113,157 +2078,11 @@ pub mod pagination {
     }
 }
 
-pub mod metadata {
-    //! Module with metadata for accounts
-
-    use std::{borrow::Borrow, collections::BTreeMap};
-
-    use eyre::{eyre, Result};
-    use iroha_schema::IntoSchema;
-    use parity_scale_codec::{Decode, Encode};
-    use serde::{Deserialize, Serialize};
-
-    use crate::{Name, Value};
-
-    /// Collection of parameters by their names.
-    pub type UnlimitedMetadata = BTreeMap<Name, Value>;
-
-    /// Limits for [`Metadata`].
-    #[derive(Debug, Clone, Copy, Decode, Encode, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct Limits {
-        /// Maximum number of entries
-        pub max_len: u32,
-        /// Maximum length of entry
-        pub max_entry_byte_size: u32,
-    }
-
-    impl Limits {
-        /// Constructor.
-        pub const fn new(max_len: u32, max_entry_byte_size: u32) -> Limits {
-            Limits {
-                max_len,
-                max_entry_byte_size,
-            }
-        }
-    }
-
-    /// Collection of parameters by their names with checked insertion.
-    #[derive(
-        Debug,
-        Clone,
-        PartialEq,
-        Eq,
-        Decode,
-        Encode,
-        Serialize,
-        Deserialize,
-        Default,
-        PartialOrd,
-        Ord,
-        IntoSchema,
-    )]
-    #[serde(transparent)]
-    pub struct Metadata {
-        map: BTreeMap<Name, Value>,
-    }
-
-    impl Metadata {
-        /// Constructor.
-        pub fn new() -> Self {
-            Self {
-                map: BTreeMap::new(),
-            }
-        }
-
-        /// Inserts `key` and `value`.
-        /// Returns `Some(value)` if the value was already present, `None` otherwise.
-        ///
-        /// # Errors
-        /// Fails if `max_entry_byte_size` or `max_len` from `limits` are exceeded.
-        pub fn insert_with_limits(
-            &mut self,
-            key: Name,
-            value: Value,
-            limits: Limits,
-        ) -> Result<Option<Value>> {
-            if self.map.len() == limits.max_len as usize && !self.map.contains_key(&key) {
-                return Err(eyre!(
-                    "Metadata length limit is reached: {}",
-                    limits.max_len
-                ));
-            }
-            let entry_bytes: Vec<u8> = (key.clone(), value.clone()).encode();
-            let byte_size = entry_bytes.len();
-            if byte_size > limits.max_entry_byte_size as usize {
-                return Err(eyre!("Metadata entry is bigger than allowed. Expected less or equal to {} bytes. Got: {} bytes", limits.max_entry_byte_size, byte_size));
-            }
-            Ok(self.map.insert(key, value))
-        }
-
-        /// Returns a reference to the value corresponding to the key.
-        pub fn get<K: Ord + ?Sized>(&self, key: &K) -> Option<&Value>
-        where
-            Name: Borrow<K>,
-        {
-            self.map.get(key)
-        }
-
-        /// Removes a key from the map, returning the value at the key if the key was previously in the map.
-        pub fn remove<K: Ord + ?Sized>(&mut self, key: &K) -> Option<Value>
-        where
-            Name: Borrow<K>,
-        {
-            self.map.remove(key)
-        }
-    }
-
-    /// The prelude re-exports most commonly used traits, structs and macros from this module.
-    pub mod prelude {
-        pub use super::{Limits as MetadataLimits, Metadata, UnlimitedMetadata};
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{Limits, Metadata};
-
-        #[test]
-        fn insert_exceeds_entry_size() {
-            let mut metadata = Metadata::new();
-            let limits = Limits::new(10, 5);
-            assert!(metadata
-                .insert_with_limits("1".to_owned(), "2".to_owned().into(), limits)
-                .is_ok());
-            assert!(metadata
-                .insert_with_limits("1".to_owned(), "23456".to_owned().into(), limits)
-                .is_err());
-        }
-
-        #[test]
-        fn insert_exceeds_len() {
-            let mut metadata = Metadata::new();
-            let limits = Limits::new(2, 5);
-            assert!(metadata
-                .insert_with_limits("1".to_owned(), "0".to_owned().into(), limits)
-                .is_ok());
-            assert!(metadata
-                .insert_with_limits("2".to_owned(), "0".to_owned().into(), limits)
-                .is_ok());
-            assert!(metadata
-                .insert_with_limits("2".to_owned(), "1".to_owned().into(), limits)
-                .is_ok());
-            assert!(metadata
-                .insert_with_limits("3".to_owned(), "0".to_owned().into(), limits)
-                .is_err());
-        }
-    }
-}
-
 pub mod uri {
     //! URI that `Torii` uses to route incoming requests.
 
     /// Default socket for listening on external requests
     pub const DEFAULT_API_URL: &str = "127.0.0.1:8080";
-
     /// Query URI is used to handle incoming Query requests.
     pub const QUERY: &str = "query";
     /// Transaction URI is used to handle incoming ISI requests.
@@ -2273,9 +2092,11 @@ pub mod uri {
     /// Health URI is used to handle incoming Healthcheck requests.
     pub const HEALTH: &str = "health";
     /// The URI used for block synchronization.
-    pub const BLOCK_SYNC: &str = "block";
+    pub const BLOCK_SYNC: &str = "block/sync";
     /// The web socket uri used to subscribe to block and transactions statuses.
     pub const SUBSCRIPTION: &str = "events";
+    /// The web socket uri used to subscribe to blocks stream.
+    pub const BLOCKS_STREAM: &str = "block/stream";
     /// Get pending transactions.
     pub const PENDING_TRANSACTIONS: &str = "pending_transactions";
     /// The URI for local config changing inspecting
@@ -2287,18 +2108,21 @@ pub mod uri {
     pub const METRICS: &str = "metrics";
 }
 
-/// The prelude re-exports most commonly used traits, structs and macros from this crate.
 pub mod prelude {
+    //! Prelude: re-export of most commonly used traits, structs and macros in this crate.
     #[cfg(feature = "roles")]
     pub use super::role::prelude::*;
     pub use super::{
         account::prelude::*, asset::prelude::*, current_time, domain::prelude::*,
         fixed::prelude::*, pagination::prelude::*, peer::prelude::*, transaction::prelude::*, uri,
-        Bytes, IdBox, Identifiable, IdentifiableBox, Name, Parameter, Status, TryAsMut, TryAsRef,
-        Value,
+        Bytes, IdBox, Identifiable, IdentifiableBox, Name, Parameter, TryAsMut, TryAsRef, Value,
     };
     pub use crate::{
-        events::prelude::*, expression::prelude::*, isi::prelude::*, metadata::prelude::*,
-        permissions::prelude::*, query::prelude::*,
+        events::prelude::*,
+        expression::prelude::*,
+        isi::prelude::*,
+        metadata::{self, prelude::*},
+        permissions::prelude::*,
+        query::prelude::*,
     };
 }
